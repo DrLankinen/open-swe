@@ -1031,35 +1031,19 @@ def verify_linear_signature(body: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-@app.post("/webhooks/linear")
-async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
-    request: Request, background_tasks: BackgroundTasks
-) -> dict[str, str]:
-    """Handle Linear webhooks.
+async def parse_linear_comment_trigger(payload: dict[str, Any]) -> dict[str, Any]:
+    """Parse a Linear comment payload into a reusable Open SWE trigger.
 
-    Triggers a new LangGraph run when an issue gets the 'open-swe' label added.
+    This intentionally excludes webhook signature verification so webhook and
+    polling entrypoints can share the same trigger acceptance rules.
     """
-    logger.info("Received Linear webhook")
-    body = await request.body()
-
-    signature = request.headers.get("Linear-Signature", "")
-    if not verify_linear_signature(body, signature, LINEAR_WEBHOOK_SECRET):
-        logger.warning("Invalid webhook signature")
-        raise HTTPException(status_code=401, detail="Invalid signature")
-
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        logger.exception("Failed to parse webhook JSON")
-        return {"status": "error", "message": "Invalid JSON"}
-
     if payload.get("type") != "Comment":
-        logger.debug("Ignoring webhook: not a Comment event")
+        logger.debug("Ignoring Linear trigger: not a Comment event")
         return {"status": "ignored", "reason": "Not a Comment event"}
 
     action = payload.get("action")
     if action != "create":
-        logger.debug("Ignoring webhook: action is %s, not create", action)
+        logger.debug("Ignoring Linear trigger: action is %s, not create", action)
         return {
             "status": "ignored",
             "reason": f"Comment action is '{action}', only processing 'create'",
@@ -1068,44 +1052,35 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
     data = payload.get("data", {})
 
     if data.get("botActor"):
-        logger.debug("Ignoring webhook: comment is from a bot")
+        logger.debug("Ignoring Linear trigger: comment is from a bot")
         return {"status": "ignored", "reason": "Comment is from a bot"}
 
     comment_body = data.get("body", "")
-    bot_message_prefixes = [
-        "🔐 **GitHub Authentication Required**",
-        "✅ **Pull Request Created**",
-        "✅ **Pull Request Updated**",
-        "**Pull Request Created**",
-        "**Pull Request Updated**",
-        "🤖 **Agent Response**",
-        "❌ **Agent Error**",
-    ]
-    for prefix in bot_message_prefixes:
+    for prefix in _GITHUB_BOT_MESSAGE_PREFIXES:
         if comment_body.startswith(prefix):
-            logger.debug("Ignoring webhook: comment is our own bot message")
+            logger.debug("Ignoring Linear trigger: comment is our own bot message")
             return {"status": "ignored", "reason": "Comment is our own bot message"}
     if "@openswe" not in comment_body.lower():
-        logger.debug("Ignoring webhook: comment doesn't mention @openswe")
+        logger.debug("Ignoring Linear trigger: comment doesn't mention @openswe")
         return {"status": "ignored", "reason": "Comment doesn't mention @openswe"}
 
     issue = data.get("issue", {})
     if not issue:
-        logger.debug("Ignoring webhook: no issue data in comment")
+        logger.debug("Ignoring Linear trigger: no issue data in comment")
         return {"status": "ignored", "reason": "No issue data in comment"}
 
-    # Fetch full issue details to get project info (webhook doesn't include it)
+    # Fetch full issue details to get project info (webhooks and poll results may omit it).
     issue_id = issue.get("id", "")
     full_issue = await fetch_linear_issue_details(issue_id)
     if not full_issue:
-        logger.warning("Failed to fetch full issue details, using webhook data")
+        logger.warning("Failed to fetch full issue details, using trigger issue data")
         full_issue = issue
 
     repo_config = extract_repo_from_text(comment_body, default_owner=DEFAULT_REPO_OWNER)
 
     if repo_config:
         logger.debug(
-            "Using repo from comment body: %s/%s",
+            "Using repo from Linear comment body: %s/%s",
             repo_config["owner"],
             repo_config["name"],
         )
@@ -1131,20 +1106,51 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
 
     if not _is_repo_allowed(repo_config):
         logger.warning(
-            "Rejecting Linear webhook: repo '%s/%s' not in allowlist",
+            "Rejecting Linear trigger: repo '%s/%s' not in allowlist",
             repo_config.get("owner"),
             repo_config.get("name"),
         )
         return {"status": "ignored", "reason": "Repository not in allowlist"}
-
-    repo_owner = repo_config["owner"]
-    repo_name = repo_config["name"]
 
     issue["triggering_comment"] = comment_body
     issue["triggering_comment_id"] = data.get("id", "")
     comment_user = data.get("user", {})
     if comment_user:
         issue["comment_author"] = comment_user
+
+    return {"status": "accepted", "issue": issue, "repo_config": repo_config}
+
+
+@app.post("/webhooks/linear")
+async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
+    request: Request, background_tasks: BackgroundTasks
+) -> dict[str, str]:
+    """Handle Linear webhooks.
+
+    Triggers a new LangGraph run when an issue gets the 'open-swe' label added.
+    """
+    logger.info("Received Linear webhook")
+    body = await request.body()
+
+    signature = request.headers.get("Linear-Signature", "")
+    if not verify_linear_signature(body, signature, LINEAR_WEBHOOK_SECRET):
+        logger.warning("Invalid webhook signature")
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        logger.exception("Failed to parse webhook JSON")
+        return {"status": "error", "message": "Invalid JSON"}
+
+    trigger = await parse_linear_comment_trigger(payload)
+    if trigger.get("status") != "accepted":
+        return trigger
+
+    issue = trigger["issue"]
+    repo_config = trigger["repo_config"]
+    repo_owner = repo_config["owner"]
+    repo_name = repo_config["name"]
 
     logger.info(
         "Accepted webhook for issue '%s' (%s), scheduling background task",
@@ -2208,6 +2214,54 @@ async def process_github_issue(payload: dict[str, Any], event_type: str) -> None
     logger.info("LangGraph run created for thread %s from GitHub issue", thread_id)
 
 
+async def parse_github_issue_comment_trigger(
+    payload: dict[str, Any], event_type: str = "issue_comment"
+) -> dict[str, str]:
+    """Parse a GitHub issue-comment payload into a reusable Open SWE trigger.
+
+    This is intentionally scoped to GitHub issue comments for the polling v1 path.
+    PR comments and review events remain on the existing webhook-only paths for now.
+    """
+    if event_type != "issue_comment":
+        return {"status": "ignored", "reason": f"Unsupported event type: {event_type}"}
+
+    action = payload.get("action", "")
+    supported_comment_actions = _SUPPORTED_GH_COMMENT_ACTIONS.get(event_type, frozenset())
+    if action and action not in supported_comment_actions:
+        logger.debug("Ignoring unsupported GitHub %s action: %s", event_type, action)
+        return {"status": "ignored", "reason": f"Unsupported GitHub {event_type} action: {action}"}
+
+    repo = payload.get("repository", {})
+    repo_config = {
+        "owner": repo.get("owner", {}).get("login", ""),
+        "name": repo.get("name", ""),
+    }
+
+    if not _is_repo_allowed(repo_config):
+        logger.warning(
+            "Rejecting GitHub issue-comment trigger: repo '%s/%s' not in allowlist",
+            repo_config.get("owner"),
+            repo_config.get("name"),
+        )
+        return {"status": "ignored", "reason": "Repository not in allowlist"}
+
+    issue = payload.get("issue", {})
+    if issue.get("pull_request"):
+        return {"status": "ignored", "reason": "Pull request comments are not handled by v1 poller"}
+
+    comment = payload.get("comment", {})
+    comment_body = comment.get("body") or ""
+    if not any(tag in comment_body.lower() for tag in OPEN_SWE_TAGS):
+        logger.debug("Ignoring GitHub issue comment that does not mention @openswe or @open-swe")
+        return {"status": "ignored", "reason": "Comment does not mention @openswe or @open-swe"}
+
+    gate_rejection = await _enforce_public_repo_org_gate(payload, event_type)
+    if gate_rejection is not None:
+        return gate_rejection
+
+    return {"status": "accepted"}
+
+
 @app.post("/webhooks/github")
 async def github_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
     """Handle GitHub webhooks for issue and PR events that tag @open-swe."""
@@ -2357,6 +2411,9 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
         return {"status": "accepted", "message": f"Processing {event_type} event"}
 
     if is_issue_comment:
+        trigger = await parse_github_issue_comment_trigger(payload, event_type)
+        if trigger.get("status") != "accepted":
+            return trigger
         background_tasks.add_task(process_github_issue, payload, event_type)
         return {"status": "accepted", "message": "Processing GitHub issue comment event"}
 
