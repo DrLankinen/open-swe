@@ -14,6 +14,7 @@ from agent.utils.poller_state import get_cursor, mark_processed, set_cursor, was
 from agent.webapp import (
     parse_github_issue_comment_trigger,
     parse_github_pr_comment_trigger,
+    parse_github_pr_review_comment_trigger,
     process_github_issue,
     process_github_pr_comment,
 )
@@ -21,7 +22,8 @@ from agent.webapp import (
 logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE = "https://api.github.com"
-GITHUB_CURSOR_KEY = "issue_comments_since"
+ISSUE_COMMENTS_CURSOR_KEY = "issue_comments_since"
+PR_REVIEW_COMMENTS_CURSOR_KEY = "pr_review_comments_since"
 DEDUPE_NAMESPACE = ("poller", "dedupe")
 DEFAULT_LOOKBACK_MINUTES = 5
 
@@ -64,15 +66,28 @@ def _default_since() -> str:
     return since.isoformat().replace("+00:00", "Z")
 
 
-def _event_id(comment: dict[str, Any]) -> str:
+def _issue_comment_event_id(comment: dict[str, Any]) -> str:
     comment_id = str(comment.get("id", ""))
     updated_at = comment.get("updated_at") or comment.get("created_at") or ""
     return f"github:issue_comment:{comment_id}:{updated_at}"
 
 
+def _pr_review_comment_event_id(comment: dict[str, Any]) -> str:
+    comment_id = str(comment.get("id", ""))
+    updated_at = comment.get("updated_at") or comment.get("created_at") or ""
+    return f"github:pr_review_comment:{comment_id}:{updated_at}"
+
+
 def _issue_number_from_url(issue_url: str) -> int | None:
     try:
         return int(issue_url.rstrip("/").rsplit("/", 1)[-1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _pr_number_from_url(pull_request_url: str) -> int | None:
+    try:
+        return int(pull_request_url.rstrip("/").rsplit("/", 1)[-1])
     except (TypeError, ValueError):
         return None
 
@@ -105,6 +120,28 @@ async def fetch_issue_comments_since(
     return comments
 
 
+async def fetch_pr_review_comments_since(
+    client: httpx.AsyncClient, owner: str, repo: str, since: str
+) -> list[dict[str, Any]]:
+    """Fetch inline PR review comments updated since the cursor."""
+    comments: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        response = await client.get(
+            f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/comments",
+            params={"since": since, "per_page": 100, "page": page},
+        )
+        response.raise_for_status()
+        batch = response.json()
+        if not isinstance(batch, list) or not batch:
+            break
+        comments.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    return comments
+
+
 async def fetch_issue(
     client: httpx.AsyncClient, owner: str, repo: str, issue_number: int
 ) -> dict[str, Any] | None:
@@ -115,6 +152,18 @@ async def fetch_issue(
     response.raise_for_status()
     issue = response.json()
     return issue if isinstance(issue, dict) else None
+
+
+async def fetch_pull_request(
+    client: httpx.AsyncClient, owner: str, repo: str, pr_number: int
+) -> dict[str, Any] | None:
+    """Fetch a GitHub pull request for an inline review comment."""
+    response = await client.get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}")
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    pull_request = response.json()
+    return pull_request if isinstance(pull_request, dict) else None
 
 
 def build_issue_comment_payload(
@@ -134,20 +183,39 @@ def build_issue_comment_payload(
     }
 
 
+def build_pr_review_comment_payload(
+    owner: str, repo: str, pull_request: dict[str, Any], comment: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the webhook-like payload expected by the existing PR comment processor."""
+    comment_user = comment.get("user") or {}
+    return {
+        "action": _comment_action(comment),
+        "pull_request": pull_request,
+        "comment": comment,
+        "repository": {"owner": {"login": owner}, "name": repo},
+        "sender": {
+            "login": comment_user.get("login", ""),
+            "id": comment_user.get("id"),
+        },
+    }
+
+
 async def poll_repo(owner: str, repo: str, token: str) -> None:
     """Poll one GitHub repository for issue comments that mention Open SWE."""
     namespace = _repo_namespace(owner, repo)
-    since = await get_cursor(namespace, GITHUB_CURSOR_KEY) or _default_since()
-    max_seen = since
+    issue_since = await get_cursor(namespace, ISSUE_COMMENTS_CURSOR_KEY) or _default_since()
+    issue_max_seen = issue_since
+    review_since = await get_cursor(namespace, PR_REVIEW_COMMENTS_CURSOR_KEY) or _default_since()
+    review_max_seen = review_since
 
     async with httpx.AsyncClient(headers=_headers(token), timeout=30) as client:
-        comments = await fetch_issue_comments_since(client, owner, repo, since)
+        comments = await fetch_issue_comments_since(client, owner, repo, issue_since)
         for comment in sorted(comments, key=lambda item: item.get("updated_at") or ""):
             updated_at = comment.get("updated_at") or comment.get("created_at") or ""
-            if updated_at and updated_at > max_seen:
-                max_seen = updated_at
+            if updated_at and updated_at > issue_max_seen:
+                issue_max_seen = updated_at
 
-            event_id = _event_id(comment)
+            event_id = _issue_comment_event_id(comment)
             if await was_processed(DEDUPE_NAMESPACE, event_id):
                 continue
 
@@ -186,8 +254,48 @@ async def poll_repo(owner: str, repo: str, token: str) -> None:
             await process_github_issue(payload, "issue_comment")
             await mark_processed(DEDUPE_NAMESPACE, event_id, {"repo": f"{owner}/{repo}"})
 
-    if max_seen != since:
-        await set_cursor(namespace, GITHUB_CURSOR_KEY, max_seen)
+        review_comments = await fetch_pr_review_comments_since(client, owner, repo, review_since)
+        for comment in sorted(review_comments, key=lambda item: item.get("updated_at") or ""):
+            updated_at = comment.get("updated_at") or comment.get("created_at") or ""
+            if updated_at and updated_at > review_max_seen:
+                review_max_seen = updated_at
+
+            event_id = _pr_review_comment_event_id(comment)
+            if await was_processed(DEDUPE_NAMESPACE, event_id):
+                continue
+
+            body = (comment.get("body") or "").lower()
+            if "@openswe" not in body and "@open-swe" not in body:
+                await mark_processed(DEDUPE_NAMESPACE, event_id)
+                continue
+
+            pr_number = _pr_number_from_url(comment.get("pull_request_url", ""))
+            if pr_number is None:
+                logger.warning(
+                    "Could not determine PR number for GitHub review comment %s", event_id
+                )
+                await mark_processed(DEDUPE_NAMESPACE, event_id)
+                continue
+
+            pull_request = await fetch_pull_request(client, owner, repo, pr_number)
+            if not pull_request:
+                await mark_processed(DEDUPE_NAMESPACE, event_id)
+                continue
+
+            payload = build_pr_review_comment_payload(owner, repo, pull_request, comment)
+            trigger = await parse_github_pr_review_comment_trigger(payload)
+            if trigger.get("status") != "accepted":
+                logger.debug("Ignoring GitHub polled review comment %s: %s", event_id, trigger)
+                await mark_processed(DEDUPE_NAMESPACE, event_id, trigger)
+                continue
+
+            await process_github_pr_comment(payload, "pull_request_review_comment")
+            await mark_processed(DEDUPE_NAMESPACE, event_id, {"repo": f"{owner}/{repo}"})
+
+    if issue_max_seen != issue_since:
+        await set_cursor(namespace, ISSUE_COMMENTS_CURSOR_KEY, issue_max_seen)
+    if review_max_seen != review_since:
+        await set_cursor(namespace, PR_REVIEW_COMMENTS_CURSOR_KEY, review_max_seen)
 
 
 async def poll_github_once(repos: list[tuple[str, str]] | None = None) -> None:
