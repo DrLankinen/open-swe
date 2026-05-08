@@ -11,7 +11,12 @@ import httpx
 
 from agent.utils.github_app import get_github_app_installation_token
 from agent.utils.poller_state import get_cursor, mark_processed, set_cursor, was_processed
-from agent.webapp import parse_github_issue_comment_trigger, process_github_issue
+from agent.webapp import (
+    parse_github_issue_comment_trigger,
+    parse_github_pr_comment_trigger,
+    process_github_issue,
+    process_github_pr_comment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,12 +166,17 @@ async def poll_repo(owner: str, repo: str, token: str) -> None:
             if not issue:
                 await mark_processed(DEDUPE_NAMESPACE, event_id)
                 continue
-            if issue.get("pull_request"):
-                logger.debug("Skipping GitHub PR comment %s in v1 issue-comment poller", event_id)
-                await mark_processed(DEDUPE_NAMESPACE, event_id)
+            payload = build_issue_comment_payload(owner, repo, issue, comment)
+            if "pull_request" in issue:
+                trigger = await parse_github_pr_comment_trigger(payload)
+                if trigger.get("status") != "accepted":
+                    logger.debug("Ignoring GitHub polled PR comment %s: %s", event_id, trigger)
+                    await mark_processed(DEDUPE_NAMESPACE, event_id, trigger)
+                    continue
+                await process_github_pr_comment(payload, "issue_comment")
+                await mark_processed(DEDUPE_NAMESPACE, event_id, {"repo": f"{owner}/{repo}"})
                 continue
 
-            payload = build_issue_comment_payload(owner, repo, issue, comment)
             trigger = await parse_github_issue_comment_trigger(payload)
             if trigger.get("status") != "accepted":
                 logger.debug("Ignoring GitHub polled comment %s: %s", event_id, trigger)

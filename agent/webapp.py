@@ -2262,6 +2262,50 @@ async def parse_github_issue_comment_trigger(
     return {"status": "accepted"}
 
 
+async def parse_github_pr_comment_trigger(
+    payload: dict[str, Any], event_type: str = "issue_comment"
+) -> dict[str, str]:
+    """Parse a GitHub PR conversation comment payload for polling triggers."""
+    if event_type != "issue_comment":
+        return {"status": "ignored", "reason": f"Unsupported event type: {event_type}"}
+
+    action = payload.get("action", "")
+    supported_comment_actions = _SUPPORTED_GH_COMMENT_ACTIONS.get(event_type, frozenset())
+    if action and action not in supported_comment_actions:
+        logger.debug("Ignoring unsupported GitHub %s action: %s", event_type, action)
+        return {"status": "ignored", "reason": f"Unsupported GitHub {event_type} action: {action}"}
+
+    repo = payload.get("repository", {})
+    repo_config = {
+        "owner": repo.get("owner", {}).get("login", ""),
+        "name": repo.get("name", ""),
+    }
+
+    if not _is_repo_allowed(repo_config):
+        logger.warning(
+            "Rejecting GitHub PR comment trigger: repo '%s/%s' not in allowlist",
+            repo_config.get("owner"),
+            repo_config.get("name"),
+        )
+        return {"status": "ignored", "reason": "Repository not in allowlist"}
+
+    issue = payload.get("issue", {})
+    if "pull_request" not in issue:
+        return {"status": "ignored", "reason": "Issue comments are not PR comments"}
+
+    comment = payload.get("comment", {})
+    comment_body = comment.get("body") or ""
+    if not any(tag in comment_body.lower() for tag in OPEN_SWE_TAGS):
+        logger.debug("Ignoring GitHub PR comment that does not mention @openswe or @open-swe")
+        return {"status": "ignored", "reason": "Comment does not mention @openswe or @open-swe"}
+
+    gate_rejection = await _enforce_public_repo_org_gate(payload, event_type)
+    if gate_rejection is not None:
+        return gate_rejection
+
+    return {"status": "accepted"}
+
+
 @app.post("/webhooks/github")
 async def github_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
     """Handle GitHub webhooks for issue and PR events that tag @open-swe."""
