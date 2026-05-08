@@ -1,0 +1,1 @@
+"""Polling-based trigger entrypoints."""
