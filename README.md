@@ -1,3 +1,10 @@
+```
+make dev-bg
+make dev-stop
+make dev-restart
+```
+
+
 <div align="center">
   <a href="https://github.com/langchain-ai/open-swe">
     <picture>
