@@ -13,7 +13,7 @@ Dependencies are managed with **uv**. Tests use pytest (`asyncio_mode = "auto"`)
 ```bash
 make install            # uv pip install -e .
 make dev                # langgraph dev — run the LangGraph dev server (graph defined in langgraph.json)
-make run                # uvicorn agent.webapp:app --reload --port 8000 (webhook server only)
+make run                # uvicorn agent.webapp:app --reload --port 8000 (HTTP app only)
 make test               # uv run pytest -vvv tests/
 make test TEST_FILE=tests/test_open_pr_middleware.py    # single test file
 uv run pytest -vvv tests/test_open_pr_middleware.py::test_name  # single test
@@ -28,7 +28,7 @@ make format             # ruff format + ruff check --fix
 ### Two entrypoints, one process
 
 - **`agent/server.py` → `get_agent(config)`** — the LangGraph graph factory. Called per-thread. Resolves the GitHub token, gets-or-creates the sandbox for the thread, then constructs a fresh `create_deep_agent(...)` with the full tool list and middleware stack. The agent itself is stateless — all per-thread state lives in the sandbox + thread metadata.
-- **`agent/webapp.py`** — custom FastAPI routes mounted alongside the LangGraph server. This is where webhooks land (GitHub, Linear, Slack). Each webhook resolves a deterministic `thread_id` (so follow-up messages route to the same agent run), then triggers/streams a run via the `langgraph_sdk` client.
+- **`agent/webapp.py`** — custom FastAPI routes mounted alongside the LangGraph server. Slack requests land here. GitHub and Linear are detected by pollers. Each trigger resolves a deterministic `thread_id` (so follow-up messages route to the same agent run), then triggers/streams a run via the `langgraph_sdk` client.
 
 ### Sandbox lifecycle (the tricky part)
 
@@ -59,11 +59,11 @@ All tools live in `agent/tools/` and are flat-imported via `agent/tools/__init__
 ### Auth
 
 - **GitHub**: dual-mode. User OAuth tokens are encrypted-at-rest in thread metadata (`agent/encryption.py`, `utils/auth.py:resolve_github_token`). When no user token is available, falls back to a GitHub App installation token (`utils/github_app.py`). The installation token is also what configures the LangSmith sandbox's GitHub proxy.
-- **Webhooks**: GitHub signatures verified in `utils/github_comments.py:verify_github_signature`; Slack/Linear handled in their respective utils.
+- **Request signatures**: GitHub signature verification lives in `utils/github_comments.py:verify_github_signature`; Slack/Linear helpers live in their respective utils.
 
 ### Thread-id derivation
 
-Webhooks compute deterministic thread ids so the same Linear issue / Slack thread / PR routes back to the same running agent. See `utils/github_comments.py:get_thread_id_from_branch` and the equivalents in `utils/linear.py` / `utils/slack.py`.
+Polling and incoming request handlers compute deterministic thread ids so the same Linear issue / Slack thread / PR routes back to the same running agent. See `utils/github_comments.py:get_thread_id_from_branch` and the equivalents in `utils/linear.py` / `utils/slack.py`.
 
 ## Conventions
 

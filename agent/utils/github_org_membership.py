@@ -1,4 +1,4 @@
-"""GitHub organization membership checks for webhook gating."""
+"""GitHub organization membership checks for trigger gating."""
 
 from __future__ import annotations
 

@@ -169,7 +169,7 @@ async def fetch_pull_request(
 def build_issue_comment_payload(
     owner: str, repo: str, issue: dict[str, Any], comment: dict[str, Any]
 ) -> dict[str, Any]:
-    """Build the webhook-like payload expected by the existing GitHub processor."""
+    """Build the event payload expected by the existing GitHub processor."""
     comment_user = comment.get("user") or {}
     return {
         "action": _comment_action(comment),
@@ -186,7 +186,7 @@ def build_issue_comment_payload(
 def build_pr_review_comment_payload(
     owner: str, repo: str, pull_request: dict[str, Any], comment: dict[str, Any]
 ) -> dict[str, Any]:
-    """Build the webhook-like payload expected by the existing PR comment processor."""
+    """Build the event payload expected by the existing PR comment processor."""
     comment_user = comment.get("user") or {}
     return {
         "action": _comment_action(comment),

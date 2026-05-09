@@ -2,7 +2,7 @@
 
 Findings live in LangGraph thread metadata under the canonical reviewer thread
 for a PR. This file owns the Finding schema and the read/write helpers that
-the reviewer's tools and webhook handlers go through.
+the reviewer's tools and trigger handlers go through.
 
 Why thread metadata: it survives sandbox eviction, is queryable cross-thread
 via the langgraph SDK (a future UI lists all reviewer threads by filtering on

@@ -18,13 +18,13 @@ Design for the Open SWE Reviewer Agent. Goal is to match Devin Review's *perceiv
 
 ## Dispatch model
 
-**One canonical reviewer thread per PR.** Thread id is derived deterministically from the PR URL (or `owner/repo#number`), the same way the existing webhook handlers in `agent/utils/` already derive thread ids per source. Every trigger surface routes to the same thread, so findings, sandbox, and watch state stay continuous.
+**One canonical reviewer thread per PR.** Thread id is derived deterministically from the PR URL (or `owner/repo#number`), the same way the existing trigger handlers in `agent/utils/` already derive thread ids per source. Every trigger surface routes to the same thread, so findings, sandbox, and watch state stay continuous.
 
 Trigger surfaces:
 
-1. **Slack** — handled by the main agent. The user asks the bot to review a PR; the main agent calls a `request_pr_review(pr_url, message)` tool. That tool resolves the canonical reviewer thread id from the PR URL and triggers a run via `langgraph_sdk` (same pattern as the existing GitHub PR webhook path). This already exists in some form (see `agent/tools/request_pr_review.py`).
-2. **GitHub webhook — review requested.** Direct invocation of the reviewer graph against the canonical thread.
-3. **GitHub webhook — push to a watched PR.** Direct invocation against the same canonical thread; the watch flag in thread metadata gates whether we trigger.
+1. **Slack** — handled by the main agent. The user asks the bot to review a PR; the main agent calls a `request_pr_review(pr_url, message)` tool. That tool resolves the canonical reviewer thread id from the PR URL and triggers a run via `langgraph_sdk` (same pattern as the existing GitHub PR trigger path). This already exists in some form (see `agent/tools/request_pr_review.py`).
+2. **GitHub review requested event.** Direct invocation of the reviewer graph against the canonical thread.
+3. **GitHub push to a watched PR.** Direct invocation against the same canonical thread; the watch flag in thread metadata gates whether we trigger.
 
 This unifies all paths: the reviewer graph never has to ask "who triggered me?" — it always sees the same thread and the same state, with a structured user message describing what to do.
 
@@ -173,12 +173,12 @@ First-review just has empty findings list and a full base...head diff.
 ## Watch mode
 
 - `watch: bool` flag on the reviewer thread, set to `True` implicitly on first successful review.
-- New webhook handler for GitHub `push` events: if the push is to a PR's head ref and that PR's reviewer thread has `watch=True`, emit the structured re-review user message into the thread (via `langgraph_sdk`, same dispatch path as other webhook triggers).
-- An explicit `unwatch_pr` tool / API endpoint stops watching (e.g. once the PR is merged or the user is done). Closing/merging a PR can auto-unwatch via the existing `pull_request` webhook.
+- New handler for GitHub `push` events: if the push is to a PR's head ref and that PR's reviewer thread has `watch=True`, emit the structured re-review user message into the thread (via `langgraph_sdk`, same dispatch path as other triggers).
+- An explicit `unwatch_pr` tool / API endpoint stops watching (e.g. once the PR is merged or the user is done). Closing/merging a PR can auto-unwatch via the existing `pull_request` event path.
 
 Edge cases worth thinking about (not blockers):
 
-- **Empty diff since last SHA** (rebase, force-push that resolves to same tree) — skip the run at the webhook level, don't trigger the agent.
+- **Empty diff since last SHA** (rebase, force-push that resolves to same tree) — skip the run before triggering the agent.
 - **Force-push that drops `last_reviewed_sha` from history** — `git fetch` will lose the old SHA's reachability. The diff scope falls back to base...head; treat as a fresh review of the new state, but keep existing findings as starting context for reconciliation.
 - **Long gap between review and push** — sandbox evicted, falls into cold-start path automatically via the existing recreation logic. No special handling needed.
 
@@ -209,7 +209,7 @@ reviewer_graph:
 2. **Prep nodes.** `prep_repo` (clone-or-fetch + checkout) and `build_review_context` (computes diff + diff-line-set, branches on first-review vs re-review) as deterministic graph nodes before the agent.
 3. **`publish_review` tool.** Posts a GitHub PR Review with body + inline comments + ```suggestion blocks. Stores `github_review_comment_id` back on each Finding for later reconciliation.
 4. **Reviewer system prompt iteration.** Calibrate against the eval set in `REVIEWER_EVAL_PLAN.md` — severity calibration, in-diff-only discipline, suggestion quality.
-5. **Watch mode.** `watch` flag, push webhook handler, re-review user message format, `unwatch_pr` on PR close/merge, GraphQL `resolveReviewThread` on findings that move to resolved.
+5. **Watch mode.** `watch` flag, push event handler, re-review user message format, `unwatch_pr` on PR close/merge, GraphQL `resolveReviewThread` on findings that move to resolved.
 6. **(Future)** UI for full findings list, server-side dedup if needed, follow-up replies in existing threads when findings are revised.
 
 ## Followups / notes

@@ -1,10 +1,10 @@
 # Open SWE Polling Setup Instructions
 
-These instructions are for the polling-based setup. In this mode, Open SWE fetches GitHub and Linear comments directly instead of receiving GitHub or Linear webhooks.
+These instructions are for the polling-based setup. In this mode, Open SWE fetches GitHub and Linear comments directly on a timer.
 
 You do not need ngrok.
 
-You do not need GitHub or Linear webhook URLs.
+You do not need public GitHub or Linear callback URLs.
 
 ## How It Works
 
@@ -40,7 +40,7 @@ uv sync --all-extras
 
 You still need a GitHub App so Open SWE can read repositories, push branches, and open PRs.
 
-You do not need to configure GitHub webhooks.
+You do not need to configure inbound GitHub event delivery.
 
 Create a GitHub App with these repository permissions:
 
@@ -61,11 +61,11 @@ GITHUB_APP_PRIVATE_KEY=""
 GITHUB_APP_INSTALLATION_ID=""
 ```
 
-You can skip `GITHUB_WEBHOOK_SECRET` unless you also want to keep webhook support enabled.
+No shared secret is required for GitHub polling.
 
 ## 3. Set Up Linear
 
-You do not need a Linear webhook.
+You do not need inbound Linear event delivery.
 
 Create a Linear API key and set:
 
@@ -379,7 +379,7 @@ LANGGRAPH_URL="https://your-langgraph-server-url"
 TRIGGER_MODE="poll"
 ```
 
-You do not need public GitHub or Linear webhook URLs.
+You do not need public GitHub or Linear callback URLs.
 
 You do need outbound internet access from the poller to:
 

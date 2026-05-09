@@ -1,7 +1,7 @@
 
 # Installation Guide
 
-This guide walks you through setting up Open SWE end-to-end: local development, GitHub App creation, LangSmith configuration, webhooks, and production deployment.
+This guide walks you through setting up Open SWE end-to-end: local development, GitHub App creation, LangSmith configuration, polling triggers, and production deployment.
 
 > **The steps are ordered to avoid forward references.** Each step only depends on things you've already completed.
 
@@ -10,7 +10,7 @@ This guide walks you through setting up Open SWE end-to-end: local development, 
 - **Python 3.11 – 3.13** (3.14 is not yet supported due to dependency constraints)
 - [uv](https://docs.astral.sh/uv/) package manager
 - [LangGraph CLI](https://langchain-ai.github.io/langgraph/cloud/reference/cli/)
-- [ngrok](https://ngrok.com/) (for local development — exposes webhook endpoints to the internet)
+- [ngrok](https://ngrok.com/) only if you use Slack locally
 
 ## 1. Clone and install
 
@@ -22,19 +22,19 @@ source .venv/bin/activate
 uv sync --all-extras
 ```
 
-## 2. Start ngrok
+## 2. Optional: start ngrok for Slack
 
-You'll need the ngrok URL in subsequent steps when configuring webhooks, so start it first.
+GitHub and Linear are polled directly, so they do not need ngrok. If you use Slack locally, start ngrok so Slack can reach your local LangGraph server.
 
 ```bash
 ngrok http 2024 --url https://some-url-you-configure.ngrok.dev
 ```
 
-You don't need to pass the `--url` flag, however doing so will use the same subdomain each time you startup the server. Without this, you'll need to update the webhook URL in GitHub, Slack and Linear every time you restart your server for local development.
+You don't need to pass the `--url` flag, however doing so will use the same subdomain each time you startup the server. Without this, you'll need to update the Slack request URL every time you restart your server for local development.
 
-Copy the HTTPS URL you set, or if you didn't pass `--url`, the one ngrok gives you. You'll paste this into the webhook settings in steps 3 and 5.
+Copy the HTTPS URL you set, or if you didn't pass `--url`, the one ngrok gives you. You'll use it for the Slack request URL in step 5 if Slack is enabled.
 
-> Keep this terminal open — ngrok needs to stay running during local development. Use a second terminal for the rest of the steps.
+> Keep this terminal open if you use Slack locally. Use a second terminal for the rest of the steps.
 
 ## 3. Create a GitHub App
 
@@ -58,22 +58,14 @@ Write this down. You'll use it in the callback URL below and again in step 4 whe
    - **Homepage URL**: This can be any valid URL — it's only shown on the GitHub Marketplace page (which you won't be using). Use something like `https://github.com/langchain-ai/open-swe`
    - **Callback URL**: `https://smith.langchain.com/host-oauth-callback/<your-provider-id>` — replace `<your-provider-id>` with the ID you chose in step 3a (e.g. `https://smith.langchain.com/host-oauth-callback/your-org-github-oauth`)
    - **Request user authorization (OAuth) during installation**: ✅ Enable this
-   - **Webhook URL**: `https://<your-ngrok-url>/webhooks/github` — use the ngrok URL from step 2
-   - **Webhook secret**: generate one and save it — you'll need it later as `GITHUB_WEBHOOK_SECRET`:
-     ```bash
-     openssl rand -hex 32
-     ```
+   - Leave inbound event delivery disabled. GitHub comments are detected by the poller.
 3. Set permissions:
    - **Repository permissions**:
      - Contents: Read & write
      - Pull requests: Read & write
      - Issues: Read & write
      - Metadata: Read-only
-4. Under **Subscribe to events**, enable:
-   - `Issue comment`
-   - `Pull request review`
-   - `Pull request review comment`
-5. Click **Create GitHub App**
+4. Click **Create GitHub App**
 
 ### 3c. Collect credentials
 
@@ -200,7 +192,7 @@ Open SWE can be triggered from GitHub, Linear, and/or Slack. **Configure whichev
 
 ### GitHub
 
-GitHub triggering works automatically once your GitHub App is set up (step 3). Users can:
+GitHub triggering works once your GitHub App is set up and the target repos are listed in `GITHUB_POLL_REPOS`. Users can:
 - Tag `@openswe` in issue titles or bodies to start a task
 - Tag `@openswe` in issue comments for follow-up instructions
 - Tag `@openswe` in PR review comments to have it address review feedback
@@ -223,21 +215,11 @@ ALLOWED_GITHUB_ORGS="langchain-ai,anthropics"
 ALLOWED_GITHUB_REPOS="some-user/their-repo,another-org/specific-repo"
 ```
 
-A webhook is accepted if the repo's org is in `ALLOWED_GITHUB_ORGS` **or** the `owner/repo` is in `ALLOWED_GITHUB_REPOS`. If both are empty, all repos are allowed.
+A GitHub task is accepted if the repo's org is in `ALLOWED_GITHUB_ORGS` **or** the `owner/repo` is in `ALLOWED_GITHUB_REPOS`. If both are empty, all repos are allowed.
 
 ### Linear (optional)
 
-Open SWE listens for Linear comments that mention `@openswe`.
-
-**Create a webhook:**
-
-1. In Linear, go to **Settings → API → Webhooks → New webhook**
-2. Fill in:
-   - **Label**: `open-swe`
-   - **URL**: `https://<your-ngrok-url>/webhooks/linear` — use the ngrok URL from step 2
-   - **Secret**: generate with `openssl rand -hex 32` — save this as `LINEAR_WEBHOOK_SECRET`
-3. Under **Data change events**, enable **Comments → Create** only
-4. Click **Create webhook**
+Open SWE polls Linear comments that mention `@openswe`.
 
 **Get your API key:**
 
@@ -354,6 +336,14 @@ Slack messages are routed to the default repo (`DEFAULT_REPO_OWNER`/`DEFAULT_REP
 Create a `.env` file in the project root. Below is the full list — only fill in the sections relevant to the triggers you configured.
 
 ```bash
+# === Polling ===
+TRIGGER_MODE="poll"
+POLL_INTERVAL_SECONDS="30"
+ENABLE_GITHUB_POLLER="true"
+ENABLE_LINEAR_POLLER="true"
+GITHUB_POLL_REPOS="your-org/your-repo"
+LANGGRAPH_URL="http://localhost:2024"
+
 # === LangSmith ===
 LANGSMITH_API_KEY_PROD=""              # From step 4a
 LANGCHAIN_TRACING_V2="true"
@@ -378,9 +368,6 @@ GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----
 "
 GITHUB_APP_INSTALLATION_ID=""          # From step 3d
 
-# === GitHub Webhook (required) ===
-GITHUB_WEBHOOK_SECRET=""               # The secret you generated in step 3b
-
 # === GitHub OAuth via LangSmith (optional) ===
 # Without these, all operations use the GitHub App's bot token.
 # With these, each user authenticates with their own GitHub account.
@@ -402,7 +389,6 @@ DEFAULT_REPO_NAME=""                   # Default GitHub repo (e.g. "my-repo")
 
 # === Linear (if using Linear trigger) ===
 LINEAR_API_KEY=""                      # From step 5
-LINEAR_WEBHOOK_SECRET=""               # From step 5
 
 # === Slack (if using Slack trigger) ===
 SLACK_BOT_TOKEN=""                     # From step 5
@@ -427,7 +413,7 @@ TOKEN_ENCRYPTION_KEY=""                # Generate with: openssl rand -base64 32
 
 ## 7. Start the server
 
-Make sure ngrok is still running from step 2, then start the LangGraph server in a second terminal:
+Start the LangGraph server:
 
 ```bash
 uv run langgraph dev --no-browser
@@ -437,12 +423,15 @@ The server runs on `http://localhost:2024` with these endpoints:
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /webhooks/github` | GitHub issue/PR/comment webhooks |
-| `POST /webhooks/linear` | Linear comment webhooks |
-| `GET /webhooks/linear` | Linear webhook verification |
-| `POST /webhooks/slack` | Slack event webhooks |
-| `GET /webhooks/slack` | Slack webhook verification |
+| `POST /webhooks/slack` | Slack Events API requests |
+| `GET /webhooks/slack` | Slack URL verification |
 | `GET /health` | Health check |
+
+Start the poller in another terminal:
+
+```bash
+uv run python -m agent.poller_main
+```
 
 ## 8. Verify it works
 
@@ -479,7 +468,7 @@ For production, deploy the agent on [LangGraph Cloud](https://langchain-ai.githu
 1. Push your code to a GitHub repository
 2. Connect the repo to LangGraph Cloud
 3. Set all environment variables from step 6 in the deployment config
-4. Update your webhook URLs (Linear, Slack, GitHub App) to point to your production URL (replace the ngrok URL)
+4. If Slack is enabled, update the Slack request URL to point to your production URL
 
 The `langgraph.json` at the project root already defines the graph entry point and HTTP app:
 
@@ -496,12 +485,12 @@ The `langgraph.json` at the project root already defines the graph entry point a
 
 ## Troubleshooting
 
-### Webhook not receiving events
+### Poller not finding comments
 
-- Verify ngrok is running and the URL matches what's configured in GitHub/Linear/Slack
-- Check the ngrok web inspector at `http://localhost:4040` for incoming requests
-- Ensure you enabled the correct event types (Comments → Create for Linear, `app_mention` for Slack, Issues + Issue comment for GitHub)
-- **Webhook secrets are required** — if `GITHUB_WEBHOOK_SECRET`, `LINEAR_WEBHOOK_SECRET`, or `SLACK_SIGNING_SECRET` is not set, all requests to that endpoint will be rejected with 401
+- Ensure `TRIGGER_MODE=poll` is set for the poller process
+- Ensure `GITHUB_POLL_REPOS` includes every GitHub repository you want checked
+- Ensure `LINEAR_API_KEY` is set if Linear polling is enabled
+- Check that comments contain `@openswe` and were created after the poller started
 
 ### GitHub authentication errors
 
@@ -522,7 +511,7 @@ The `langgraph.json` at the project root already defines the graph entry point a
 - For GitHub: ensure the comment or issue contains `@openswe` (case-insensitive), and the commenter's GitHub username is in `GITHUB_USER_EMAIL_MAP`
 - For Linear: ensure the comment contains `@openswe` (case-insensitive)
 - For Slack: ensure the bot is invited to the channel and the message is an `@mention`
-- Check server logs for webhook processing errors
+- Check server and poller logs for processing errors
 
 ### Token encryption errors
 

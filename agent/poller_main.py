@@ -36,7 +36,7 @@ def validate_poller_config() -> list[tuple[str, str]]:
     """Validate polling-only configuration and return configured GitHub repos."""
     trigger_mode = os.environ.get("TRIGGER_MODE", "").strip().lower()
     if trigger_mode != "poll":
-        msg = "Set TRIGGER_MODE=poll to run polling triggers without webhooks."
+        msg = "Set TRIGGER_MODE=poll to run polling triggers."
         raise ValueError(msg)
 
     github_enabled = _env_bool("ENABLE_GITHUB_POLLER", default=True)

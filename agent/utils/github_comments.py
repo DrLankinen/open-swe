@@ -1,4 +1,4 @@
-"""GitHub webhook comment utilities."""
+"""GitHub comment trigger utilities."""
 
 from __future__ import annotations
 
@@ -32,18 +32,18 @@ _REACTION_ENDPOINTS: dict[str, str] = {
 
 
 def verify_github_signature(body: bytes, signature: str, *, secret: str) -> bool:
-    """Verify the GitHub webhook signature (X-Hub-Signature-256).
+    """Verify the GitHub request signature (X-Hub-Signature-256).
 
     Args:
         body: Raw request body bytes.
         signature: The X-Hub-Signature-256 header value.
-        secret: The webhook signing secret.
+        secret: The request signing secret.
 
     Returns:
         True if signature is valid or no secret is configured.
     """
     if not secret:
-        logger.warning("GITHUB_WEBHOOK_SECRET is not configured — rejecting webhook request")
+        logger.warning("GITHUB_WEBHOOK_SECRET is not configured; rejecting GitHub request")
         return False
 
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
@@ -342,7 +342,7 @@ async def fetch_pr_branch(
 ) -> str:
     """Fetch the head branch name of a PR from the GitHub API.
 
-    Used for issue_comment events where the branch is not in the webhook payload.
+    Used for issue_comment events where the branch is not in the event payload.
     Token is optional — omitting it makes an unauthenticated request (lower rate limit).
 
     Args:
@@ -377,7 +377,7 @@ async def fetch_pr_branch(
 async def extract_pr_context(
     payload: dict[str, Any], event_type: str
 ) -> tuple[dict[str, str], int | None, str, str, str, int | None, str | None]:
-    """Extract key fields from a GitHub PR webhook payload.
+    """Extract key fields from a GitHub PR event payload.
 
     Returns:
         (repo_config, pr_number, branch_name, github_login, pr_url, comment_id, node_id)

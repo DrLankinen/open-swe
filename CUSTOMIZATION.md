@@ -292,16 +292,17 @@ return create_deep_agent(tools=tools, ...)
 
 ## 4. Triggers
 
-Open SWE supports three invocation surfaces: Linear, Slack, and GitHub. Each is implemented as a webhook endpoint in `agent/webapp.py`. You can add, remove, or modify triggers independently.
+Open SWE supports three invocation surfaces: Linear, Slack, and GitHub. GitHub and Linear are handled by pollers, while Slack is handled by the HTTP app in `agent/webapp.py`. You can add, remove, or modify triggers independently.
 
 ### Removing a trigger
 
-If you don't use Linear, simply don't configure the Linear webhook and remove the env vars. Same for Slack. The webhook endpoints still exist but won't receive events.
+If you don't use Linear, set `ENABLE_LINEAR_POLLER=false` and remove the Linear env vars. Same for GitHub with `ENABLE_GITHUB_POLLER=false`. If you don't use Slack, remove the Slack env vars.
 
-To fully remove a trigger's code, delete the corresponding endpoint from `agent/webapp.py`:
+To fully remove a trigger's code, delete the corresponding polling or processing path:
 
-- **Linear**: `linear_webhook()` and `process_linear_issue()`
-- **Slack**: `slack_webhook()` and `process_slack_mention()`
+- **Linear**: `agent/pollers/linear.py` and `process_linear_issue()`
+- **GitHub**: `agent/pollers/github.py` and GitHub processing helpers in `agent/webapp.py`
+- **Slack**: the Slack route and `process_slack_mention()`
 
 ### Default repository
 
@@ -354,11 +355,11 @@ Users can override per-message with `repo:owner/name` syntax in their Slack mess
 
 To add a new invocation surface (e.g. Jira, Discord, a custom API):
 
-1. **Add a webhook endpoint** in `agent/webapp.py`:
+1. **Add a polling source or HTTP route**:
 
 ```python
-@app.post("/webhooks/my-trigger")
-async def my_trigger_webhook(request: Request, background_tasks: BackgroundTasks):
+@app.post("/events/my-trigger")
+async def my_trigger_route(request: Request, background_tasks: BackgroundTasks):
     # Parse the incoming event
     payload = await request.json()
     

@@ -106,7 +106,7 @@ async def fetch_recent_linear_comments(
 
 
 def build_linear_comment_payload(comment: dict[str, Any]) -> dict[str, Any]:
-    """Build the webhook-like payload expected by the shared Linear parser."""
+    """Build the event payload expected by the shared Linear parser."""
     return {
         "type": "Comment",
         "action": "create",

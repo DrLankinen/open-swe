@@ -366,7 +366,7 @@ def _is_repo_allowed(repo_config: dict[str, str]) -> bool:
 
 
 def _is_repo_allowed_for_reviewer(repo_config: dict[str, str]) -> bool:
-    """Check if a repo is allowed for reviewer-agent webhook entrypoints."""
+    """Check if a repo is allowed for reviewer-agent trigger entrypoints."""
     owner = repo_config.get("owner", "").lower()
     name = repo_config.get("name", "").lower()
     full_name = f"{owner}/{name}" if owner and name else ""
@@ -592,7 +592,7 @@ async def process_linear_issue(  # noqa: PLR0912, PLR0915
     """Process a Linear issue by creating a new LangGraph thread and run.
 
     Args:
-        issue_data: The Linear issue data from webhook (basic info only).
+        issue_data: The Linear issue data from the trigger payload (basic info only).
         repo_config: The repo configuration with owner and name.
     """
     issue_id = issue_data.get("id", "")
@@ -1012,18 +1012,18 @@ async def process_slack_pr_review_request(
 
 
 def verify_linear_signature(body: bytes, signature: str, secret: str) -> bool:
-    """Verify the Linear webhook signature.
+    """Verify the Linear request signature.
 
     Args:
         body: Raw request body bytes
         signature: The Linear-Signature header value
-        secret: The webhook signing secret
+        secret: The request signing secret
 
     Returns:
         True if signature is valid, False otherwise
     """
     if not secret:
-        logger.warning("LINEAR_WEBHOOK_SECRET is not configured — rejecting webhook request")
+        logger.warning("LINEAR_WEBHOOK_SECRET is not configured; rejecting Linear request")
         return False
 
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -1034,7 +1034,7 @@ def verify_linear_signature(body: bytes, signature: str, secret: str) -> bool:
 async def parse_linear_comment_trigger(payload: dict[str, Any]) -> dict[str, Any]:
     """Parse a Linear comment payload into a reusable Open SWE trigger.
 
-    This intentionally excludes webhook signature verification so webhook and
+    This intentionally excludes request signature verification so HTTP and
     polling entrypoints can share the same trigger acceptance rules.
     """
     if payload.get("type") != "Comment":
@@ -1069,7 +1069,7 @@ async def parse_linear_comment_trigger(payload: dict[str, Any]) -> dict[str, Any
         logger.debug("Ignoring Linear trigger: no issue data in comment")
         return {"status": "ignored", "reason": "No issue data in comment"}
 
-    # Fetch full issue details to get project info (webhooks and poll results may omit it).
+    # Fetch full issue details to get project info; trigger payloads may omit it.
     issue_id = issue.get("id", "")
     full_issue = await fetch_linear_issue_details(issue_id)
     if not full_issue:
@@ -1125,22 +1125,22 @@ async def parse_linear_comment_trigger(payload: dict[str, Any]) -> dict[str, Any
 async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
     request: Request, background_tasks: BackgroundTasks
 ) -> dict[str, str]:
-    """Handle Linear webhooks.
+    """Handle inbound Linear comment events.
 
-    Triggers a new LangGraph run when an issue gets the 'open-swe' label added.
+    Triggers a new LangGraph run when a Linear comment mentions Open SWE.
     """
-    logger.info("Received Linear webhook")
+    logger.info("Received Linear event request")
     body = await request.body()
 
     signature = request.headers.get("Linear-Signature", "")
     if not verify_linear_signature(body, signature, LINEAR_WEBHOOK_SECRET):
-        logger.warning("Invalid webhook signature")
+        logger.warning("Invalid Linear request signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
-        logger.exception("Failed to parse webhook JSON")
+        logger.exception("Failed to parse Linear request JSON")
         return {"status": "error", "message": "Invalid JSON"}
 
     trigger = await parse_linear_comment_trigger(payload)
@@ -1153,7 +1153,7 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
     repo_name = repo_config["name"]
 
     logger.info(
-        "Accepted webhook for issue '%s' (%s), scheduling background task",
+        "Accepted Linear event for issue '%s' (%s), scheduling background task",
         issue.get("title"),
         issue.get("id"),
     )
@@ -1167,13 +1167,13 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
 
 @app.get("/webhooks/linear")
 async def linear_webhook_verify() -> dict[str, str]:
-    """Verify endpoint for Linear webhook setup."""
-    return {"status": "ok", "message": "Linear webhook endpoint is active"}
+    """Verify endpoint for Linear event setup."""
+    return {"status": "ok", "message": "Linear event endpoint is active"}
 
 
 @app.post("/webhooks/slack")
 async def slack_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
-    """Handle Slack Event API webhooks for app mentions."""
+    """Handle Slack Events API requests for app mentions."""
     body = await request.body()
 
     signature = request.headers.get("X-Slack-Signature", "")
@@ -1190,7 +1190,7 @@ async def slack_webhook(request: Request, background_tasks: BackgroundTasks) -> 
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
-        logger.exception("Failed to parse Slack webhook JSON")
+        logger.exception("Failed to parse Slack request JSON")
         return {"status": "error", "message": "Invalid JSON"}
 
     if payload.get("type") == "url_verification":
@@ -1273,7 +1273,7 @@ async def slack_webhook(request: Request, background_tasks: BackgroundTasks) -> 
 
     if not _is_repo_allowed(repo_config):
         logger.warning(
-            "Rejecting Slack webhook: repo '%s/%s' not in allowlist",
+            "Rejecting Slack request: repo '%s/%s' not in allowlist",
             repo_config.get("owner"),
             repo_config.get("name"),
         )
@@ -1286,8 +1286,8 @@ async def slack_webhook(request: Request, background_tasks: BackgroundTasks) -> 
 
 @app.get("/webhooks/slack")
 async def slack_webhook_verify() -> dict[str, str]:
-    """Verify endpoint for Slack webhook setup."""
-    return {"status": "ok", "message": "Slack webhook endpoint is active"}
+    """Verify endpoint for Slack Events API setup."""
+    return {"status": "ok", "message": "Slack Events API endpoint is active"}
 
 
 @app.get("/health")
@@ -2007,7 +2007,7 @@ async def process_github_pr_comment(payload: dict[str, Any], event_type: str) ->
     since the last @open-swe tag, then creates or queues a new run.
 
     Args:
-        payload: The parsed GitHub webhook payload.
+        payload: The parsed GitHub event payload.
         event_type: One of 'issue_comment', 'pull_request_review_comment',
                     'pull_request_review'.
     """
@@ -2220,7 +2220,7 @@ async def parse_github_issue_comment_trigger(
     """Parse a GitHub issue-comment payload into a reusable Open SWE trigger.
 
     This is intentionally scoped to GitHub issue comments for the polling v1 path.
-    PR comments and review events remain on the existing webhook-only paths for now.
+    PR comments and review events remain on the existing HTTP-only paths for now.
     """
     if event_type != "issue_comment":
         return {"status": "ignored", "reason": f"Unsupported event type: {event_type}"}
@@ -2353,12 +2353,12 @@ async def parse_github_pr_review_comment_trigger(
 
 @app.post("/webhooks/github")
 async def github_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
-    """Handle GitHub webhooks for issue and PR events that tag @open-swe."""
+    """Handle inbound GitHub issue and PR events that tag @open-swe."""
     body = await request.body()
 
     signature = request.headers.get("X-Hub-Signature-256", "")
     if not verify_github_signature(body, signature, secret=GITHUB_WEBHOOK_SECRET):
-        logger.warning("Invalid GitHub webhook signature")
+        logger.warning("Invalid GitHub request signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     event_type = request.headers.get("X-GitHub-Event", "")
@@ -2369,13 +2369,13 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
-        logger.exception("Failed to parse GitHub webhook JSON")
+        logger.exception("Failed to parse GitHub request JSON")
         return {"status": "error", "message": "Invalid JSON"}
 
-    webhook_repo = payload.get("repository", {})
-    webhook_repo_config = {
-        "owner": webhook_repo.get("owner", {}).get("login", ""),
-        "name": webhook_repo.get("name", ""),
+    event_repo = payload.get("repository", {})
+    event_repo_config = {
+        "owner": event_repo.get("owner", {}).get("login", ""),
+        "name": event_repo.get("name", ""),
     }
 
     issue = payload.get("issue", {})
@@ -2393,19 +2393,19 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
                 "reason": f"Unsupported GitHub pull_request action: {action}",
             }
         if action in {"closed", "reopened"}:
-            if not _is_repo_allowed_for_reviewer(webhook_repo_config):
+            if not _is_repo_allowed_for_reviewer(event_repo_config):
                 return {"status": "ignored", "reason": "Repository not in reviewer allowlist"}
-            logger.info("Accepted GitHub PR %s webhook, scheduling reviewer watch update", action)
+            logger.info("Accepted GitHub PR %s event, scheduling reviewer watch update", action)
             background_tasks.add_task(process_github_pr_close, payload)
             return {"status": "accepted", "message": f"Processing PR {action} for reviewer watch"}
         if not _is_open_swe_reviewer_request(payload):
             logger.info("Ignoring PR review request for a different reviewer")
             return {"status": "ignored", "reason": "Review request is not for open-swe bot"}
-        if not _is_repo_allowed_for_reviewer(webhook_repo_config):
+        if not _is_repo_allowed_for_reviewer(event_repo_config):
             logger.warning(
-                "Rejecting GitHub reviewer webhook: repo '%s/%s' failed reviewer allowlist",
-                webhook_repo_config.get("owner"),
-                webhook_repo_config.get("name"),
+                "Rejecting GitHub reviewer event: repo '%s/%s' failed reviewer allowlist",
+                event_repo_config.get("owner"),
+                event_repo_config.get("name"),
             )
             if ALLOWED_REVIEWER_GITHUB_REPOS:
                 reason = "Repository not in allowlist"
@@ -2417,22 +2417,22 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
         if gate_rejection is not None:
             return gate_rejection
 
-        logger.info("Accepted GitHub PR review request webhook, scheduling reviewer task")
+        logger.info("Accepted GitHub PR review request event, scheduling reviewer task")
         background_tasks.add_task(process_github_pr_review_request, payload)
         return {"status": "accepted", "message": "Processing GitHub PR review request"}
 
     if event_type == "push":
-        if not _is_repo_allowed_for_reviewer(webhook_repo_config):
+        if not _is_repo_allowed_for_reviewer(event_repo_config):
             return {"status": "ignored", "reason": "Repository not in reviewer allowlist"}
-        logger.info("Accepted GitHub push webhook, scheduling reviewer watch evaluation")
+        logger.info("Accepted GitHub push event, scheduling reviewer watch evaluation")
         background_tasks.add_task(process_github_push_event, payload)
         return {"status": "accepted", "message": "Processing GitHub push for reviewer watch"}
 
-    if not _is_repo_allowed(webhook_repo_config):
+    if not _is_repo_allowed(event_repo_config):
         logger.warning(
-            "Rejecting GitHub webhook: repo '%s/%s' not in allowlist",
-            webhook_repo_config.get("owner"),
-            webhook_repo_config.get("name"),
+            "Rejecting GitHub event: repo '%s/%s' not in allowlist",
+            event_repo_config.get("owner"),
+            event_repo_config.get("name"),
         )
         return {"status": "ignored", "reason": "Repository not in allowlist"}
 
@@ -2456,7 +2456,7 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
         if gate_rejection is not None:
             return gate_rejection
 
-        logger.info("Accepted GitHub issue webhook, scheduling background task")
+        logger.info("Accepted GitHub issue event, scheduling background task")
         background_tasks.add_task(process_github_issue, payload, event_type)
         return {"status": "accepted", "message": "Processing GitHub issue event"}
 
@@ -2483,14 +2483,14 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
     if gate_rejection is not None:
         return gate_rejection
 
-    logger.info("Accepted GitHub webhook: event=%s, scheduling background task", event_type)
+    logger.info("Accepted GitHub event: event=%s, scheduling background task", event_type)
     if is_pull_request_comment or event_type in {
         "pull_request_review_comment",
         "pull_request_review",
     }:
         is_review_command, pr_url_override = parse_github_review_command(comment_body)
         if is_review_command:
-            if not _is_repo_allowed_for_reviewer(webhook_repo_config):
+            if not _is_repo_allowed_for_reviewer(event_repo_config):
                 return {"status": "ignored", "reason": "Repository not in reviewer allowlist"}
             background_tasks.add_task(
                 process_github_pr_review_command, payload, event_type, pr_url_override

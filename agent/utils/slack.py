@@ -118,7 +118,7 @@ def verify_slack_signature(
 ) -> bool:
     """Verify Slack request signature."""
     if not secret:
-        logger.warning("SLACK_SIGNING_SECRET is not configured — rejecting webhook request")
+        logger.warning("SLACK_SIGNING_SECRET is not configured; rejecting Slack request")
         return False
     if not timestamp or not signature:
         return False
