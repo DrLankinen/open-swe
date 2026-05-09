@@ -142,6 +142,25 @@ LLM_MODEL_ID="anthropic:claude-sonnet-4-6"
 
 If `LLM_MODEL_ID` is not set, the default model (`openai:gpt-5.5`) is used.
 
+### Azure AI Foundry
+
+For OpenAI-compatible models deployed in Azure AI Foundry, keep the `openai:` provider and configure the Azure OpenAI v1 endpoint:
+
+```bash
+LLM_MODEL_ID="openai:gpt-5.5"
+AZURE_OPENAI_ENDPOINT="https://YOUR-RESOURCE.openai.azure.com"
+AZURE_OPENAI_API_KEY=""
+```
+
+`AZURE_OPENAI_ENDPOINT` is normalized to `.../openai/v1/`. If you prefer to provide the full v1 URL, set `AZURE_OPENAI_BASE_URL` instead:
+
+```bash
+AZURE_OPENAI_BASE_URL="https://YOUR-RESOURCE.openai.azure.com/openai/v1/"
+AZURE_OPENAI_API_KEY=""
+```
+
+Azure Foundry uses the Responses API for `openai:` models by default. Set `AZURE_OPENAI_USE_RESPONSES_API=false` to opt out for a deployment that does not support it.
+
 `max_tokens` is a maximum completion/output token budget, not the model's total context window. For OpenAI reasoning models, this budget can include both internal reasoning tokens and final response tokens.
 
 ### Switching models

@@ -363,7 +363,12 @@ LANGSMITH_TRACING_PROJECT_ID_PROD=""
 LANGSMITH_URL_PROD="https://smith.langchain.com"                 
 
 # === LLM ===
-ANTHROPIC_API_KEY=""                   # Anthropic API key (default provider)
+OPENAI_API_KEY=""                      # OpenAI API key for the default model
+
+# Optional: route OpenAI-compatible models through Azure AI Foundry instead
+# LLM_MODEL_ID="openai:gpt-5.5"
+# AZURE_OPENAI_ENDPOINT="https://YOUR-RESOURCE.openai.azure.com"
+# AZURE_OPENAI_API_KEY=""
 
 # === GitHub App (required) ===
 GITHUB_APP_ID=""                       # From step 3c
