@@ -1,4 +1,6 @@
-.PHONY: all format format-check lint test tests integration_tests help run dev
+.PHONY: all format format-check lint test tests integration_tests help run dev dev-bg dev-stop dev-restart
+
+DEV_LOG_FILE ?= /tmp/open-swe.log
 
 # Default target executed when no arguments are given to make.
 all: help
@@ -9,6 +11,17 @@ all: help
 
 dev:
 	uv run langgraph dev
+
+dev-bg:
+	nohup $(MAKE) dev > "$(DEV_LOG_FILE)" 2>&1 < /dev/null &
+
+dev-stop:
+	-pkill -f "[l]anggraph dev"
+	-pkill -f "[u]v run langgraph dev"
+
+dev-restart: dev-stop
+	@sleep 2
+	$(MAKE) dev-bg
 
 run:
 	uv run uvicorn agent.webapp:app --reload --port 8000
@@ -60,6 +73,9 @@ format-check:
 help:
 	@echo '----'
 	@echo 'dev                          - run LangGraph dev server'
+	@echo 'dev-bg                       - run LangGraph dev server in background'
+	@echo 'dev-stop                     - stop background LangGraph dev server'
+	@echo 'dev-restart                  - restart background LangGraph dev server'
 	@echo 'run                          - run webhook server'
 	@echo 'install                      - install dependencies'
 	@echo 'format                       - run code formatters'
