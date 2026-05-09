@@ -34,6 +34,7 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+logs/
 
 # local env files
 .env*.local
@@ -51,6 +52,9 @@ credentials.json
 
 # LangGraph API
 .langgraph_api
+
+# Local sandbox workspaces
+.workspaces/
 
 **/.claude/settings.local.json
 

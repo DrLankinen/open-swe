@@ -1,17 +1,12 @@
 import os
+from importlib import import_module
 
-from agent.integrations.daytona import create_daytona_sandbox
-from agent.integrations.langsmith import create_langsmith_sandbox
-from agent.integrations.local import create_local_sandbox
-from agent.integrations.modal import create_modal_sandbox
-from agent.integrations.runloop import create_runloop_sandbox
-
-SANDBOX_FACTORIES = {
-    "langsmith": create_langsmith_sandbox,
-    "daytona": create_daytona_sandbox,
-    "modal": create_modal_sandbox,
-    "runloop": create_runloop_sandbox,
-    "local": create_local_sandbox,
+SANDBOX_FACTORIES: dict[str, tuple[str, str]] = {
+    "langsmith": ("agent.integrations.langsmith", "create_langsmith_sandbox"),
+    "daytona": ("agent.integrations.daytona", "create_daytona_sandbox"),
+    "modal": ("agent.integrations.modal", "create_modal_sandbox"),
+    "runloop": ("agent.integrations.runloop", "create_runloop_sandbox"),
+    "local": ("agent.integrations.local", "create_local_sandbox"),
 }
 
 
@@ -27,11 +22,13 @@ def create_sandbox(sandbox_id: str | None = None):
     Returns:
         A sandbox backend implementing SandboxBackendProtocol.
     """
-    sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith")
-    factory = SANDBOX_FACTORIES.get(sandbox_type)
-    if not factory:
+    sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith").strip().lower()
+    factory_ref = SANDBOX_FACTORIES.get(sandbox_type)
+    if not factory_ref:
         supported = ", ".join(sorted(SANDBOX_FACTORIES))
         raise ValueError(f"Invalid sandbox type: {sandbox_type}. Supported types: {supported}")
+    module_name, factory_name = factory_ref
+    factory = getattr(import_module(module_name), factory_name)
     return factory(sandbox_id)
 
 
@@ -42,7 +39,7 @@ def validate_sandbox_startup_config() -> None:
     Called from the FastAPI lifespan hook so errors surface at boot rather
     than on the first sandbox creation.
     """
-    sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith")
+    sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith").strip().lower()
     if sandbox_type == "langsmith":
         from agent.integrations.langsmith import LangSmithProvider
 
