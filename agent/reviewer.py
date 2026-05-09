@@ -45,6 +45,7 @@ from .server import (
     DEFAULT_LLM_REASONING,
     DEFAULT_RECURSION_LIMIT,
     MODEL_CALL_RECURSION_LIMIT,
+    create_introspection_graph,
     ensure_sandbox_for_thread,
     graph_loaded_for_execution,
 )
@@ -268,7 +269,7 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
 
     if thread_id is None or not graph_loaded_for_execution(config):
         logger.info("No thread_id or not for execution, returning reviewer agent without sandbox")
-        return create_deep_agent(system_prompt="", tools=[]).with_config(config)
+        return create_introspection_graph(config)
 
     if config["configurable"].get("source"):
         cached_token, cached_encrypted = await get_github_token_from_thread(thread_id)

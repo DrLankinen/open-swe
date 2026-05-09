@@ -25,6 +25,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import LangSmithSandbox
 from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain.agents.middleware import ModelCallLimitMiddleware
+from langgraph.graph import END, START, StateGraph
 from langsmith.sandbox import SandboxClientError
 
 from .integrations.langsmith import _configure_github_proxy
@@ -231,6 +232,19 @@ def graph_loaded_for_execution(config: RunnableConfig) -> bool:
     )
 
 
+def _introspection_noop(state: dict) -> dict:
+    return state
+
+
+def create_introspection_graph(_config: RunnableConfig) -> Pregel:
+    """Return a minimal graph for schema/graph introspection without sandbox setup."""
+    graph = StateGraph(dict)
+    graph.add_node("introspection", _introspection_noop)
+    graph.add_edge(START, "introspection")
+    graph.add_edge("introspection", END)
+    return graph.compile()
+
+
 async def ensure_sandbox_for_thread(thread_id: str) -> SandboxBackendProtocol:
     """Get-or-create a healthy sandbox bound to ``thread_id``.
 
@@ -334,10 +348,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
 
     if thread_id is None or not graph_loaded_for_execution(config):
         logger.info("No thread_id or not for execution, returning agent without sandbox")
-        return create_deep_agent(
-            system_prompt="",
-            tools=[],
-        ).with_config(config)
+        return create_introspection_graph(config)
 
     github_token, new_encrypted = await resolve_github_token(config, thread_id)
     config["metadata"]["github_token_encrypted"] = new_encrypted
