@@ -39,6 +39,16 @@ def test_construct_system_prompt_identifies_own_repo() -> None:
     assert "langchain-ai/open-swe" in prompt
 
 
+def test_construct_system_prompt_uses_host_gh_auth_for_local_sandbox(monkeypatch) -> None:
+    monkeypatch.setenv("SANDBOX_TYPE", "local")
+
+    prompt = construct_system_prompt(working_dir="/workspace")
+
+    assert "no sandbox isolation" in prompt
+    assert "Invoke it as `gh <command>`" in prompt
+    assert "GH_TOKEN=dummy gh" not in prompt
+
+
 def test_construct_system_prompt_omits_collaboration_section_without_identity() -> None:
     prompt = construct_system_prompt(working_dir="/workspace")
 

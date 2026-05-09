@@ -35,7 +35,7 @@ def _load_default_prompt() -> str:
     return ""
 
 
-WORKING_ENV_SECTION = """---
+REMOTE_WORKING_ENV_SECTION = """---
 
 ### Working Environment
 
@@ -47,6 +47,26 @@ All code execution and file operations happen in this sandbox environment.
 - Use `{working_dir}` as your working directory for all operations
 - The `gh` CLI is installed and authenticated by a sandbox proxy. Always invoke it as `GH_TOKEN=dummy gh <command>` so the CLI passes its local auth check while the proxy injects the real runtime token.
 - Direct GitHub API calls from the sandbox are also authenticated by the proxy; do not ask the user for a GitHub token.
+- The `execute` tool enforces a 5-minute timeout by default (300 seconds)
+- If a command times out and needs longer, rerun it by explicitly passing `timeout=<seconds>` to the `execute` tool (e.g. `timeout=600` for 10 minutes)
+
+IMPORTANT: You must ALWAYS call a tool in EVERY SINGLE TURN. If you don't call a tool, the session will end and you won't be able to resume without the user manually restarting you.
+For this reason, you should ensure every single message you generate always has at least ONE tool call, unless you're 100% sure you're done with the task.
+"""
+
+
+LOCAL_WORKING_ENV_SECTION = """---
+
+### Working Environment
+
+You are operating directly on the host machine at `{working_dir}`.
+
+All code execution and file operations happen on the local host. This mode has no sandbox isolation.
+
+**Important:**
+- Use `{working_dir}` as your working directory for all operations
+- The `gh` CLI uses the host machine's GitHub authentication. Invoke it as `gh <command>`; do not prefix local-mode GitHub commands with `GH_TOKEN=dummy`.
+- If task text or examples mention `GH_TOKEN=dummy gh`, treat that as LangSmith-proxy guidance and use `gh` instead in local mode.
 - The `execute` tool enforces a 5-minute timeout by default (300 seconds)
 - If a command times out and needs longer, rerun it by explicitly passing `timeout=<seconds>` to the `execute` tool (e.g. `timeout=600` for 10 minutes)
 
@@ -378,7 +398,7 @@ def _render_collaboration_section(identity: CollaboratorIdentity | None) -> str:
 
 
 SYSTEM_PROMPT_TEMPLATE = (
-    WORKING_ENV_SECTION
+    "{working_env_section}"
     + TASK_OVERVIEW_SECTION
     + SELF_AWARENESS_SECTION
     + "{default_prompt_section}"
@@ -405,10 +425,19 @@ def construct_system_prompt(
     triggering_user_identity: CollaboratorIdentity | None = None,
 ) -> str:
     default_prompt_section = _load_default_prompt()
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    working_env_section = (
+        LOCAL_WORKING_ENV_SECTION
+        if os.getenv("SANDBOX_TYPE", "langsmith") == "local"
+        else REMOTE_WORKING_ENV_SECTION
+    )
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        working_env_section=working_env_section.format(working_dir=working_dir),
         working_dir=working_dir,
         linear_project_id=linear_project_id or "<PROJECT_ID>",
         linear_issue_number=linear_issue_number or "<ISSUE_NUMBER>",
         default_prompt_section=default_prompt_section,
         collaboration_section=_render_collaboration_section(triggering_user_identity),
     )
+    if os.getenv("SANDBOX_TYPE", "langsmith") == "local":
+        prompt = prompt.replace("GH_TOKEN=dummy gh", "gh")
+    return prompt
