@@ -431,7 +431,7 @@ def build_pr_prompt(
         f"## Comments:\n{comments_text}\n\n"
         "If code changes are needed:\n"
         "1. Make the changes in the sandbox\n"
-        "2. Push them and open/update a draft PR with `GH_TOKEN=dummy gh` — this is REQUIRED, do NOT skip it\n"
+        "2. Push them and open/update a PR with `GH_TOKEN=dummy gh` — this is REQUIRED, do NOT skip it\n"
         "3. Use `GH_TOKEN=dummy gh pr comment` to post a summary on GitHub\n\n"
         "If no code changes are needed:\n"
         "1. Use `GH_TOKEN=dummy gh pr comment` to explain your answer — this is REQUIRED, never end silently\n\n"

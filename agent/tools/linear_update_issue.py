@@ -11,6 +11,7 @@ def linear_update_issue(
     assignee_id: str | None = None,
     priority: int | None = None,
     state_id: str | None = None,
+    state_name: str | None = None,
     label_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Update an existing Linear issue.
@@ -22,6 +23,7 @@ def linear_update_issue(
         assignee_id: User ID to assign the issue to.
         priority: Priority (0=none, 1=urgent, 2=high, 3=medium, 4=low).
         state_id: Workflow state ID to transition to.
+        state_name: Workflow state name to transition to, e.g. "In Review".
         label_ids: List of label IDs to set.
 
     Returns:
@@ -35,6 +37,7 @@ def linear_update_issue(
             assignee_id=assignee_id,
             priority=priority,
             state_id=state_id,
+            state_name=state_name,
             label_ids=label_ids,
         )
     )

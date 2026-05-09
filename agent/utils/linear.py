@@ -211,9 +211,16 @@ async def update_issue(
     assignee_id: str | None = None,
     priority: int | None = None,
     state_id: str | None = None,
+    state_name: str | None = None,
     label_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Update an existing Linear issue."""
+    if state_name is not None:
+        state_id_result = await _get_issue_state_id_by_name(issue_id, state_name)
+        if "error" in state_id_result:
+            return state_id_result
+        state_id = state_id_result["state_id"]
+
     mutation = """
     mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
         issueUpdate(id: $id, input: $input) {
@@ -223,6 +230,7 @@ async def update_issue(
                 identifier
                 title
                 url
+                state { id name }
             }
         }
     }
@@ -252,6 +260,36 @@ async def update_issue(
         "success": issue_update.get("success", False),
         "issue": issue_update.get("issue"),
     }
+
+
+async def _get_issue_state_id_by_name(issue_id: str, state_name: str) -> dict[str, Any]:
+    """Find a workflow state ID on the issue's team by name."""
+    query = """
+    query GetIssueTeamStates($id: String!) {
+        issue(id: $id) {
+            team {
+                states {
+                    nodes { id name }
+                }
+            }
+        }
+    }
+    """
+    result = await _graphql_request(query, {"id": issue_id})
+    if "error" in result:
+        return result
+
+    issue = result.get("issue")
+    if not issue:
+        return {"error": f"Issue {issue_id} not found"}
+
+    states = issue.get("team", {}).get("states", {}).get("nodes", [])
+    normalized_state_name = state_name.casefold()
+    for state in states:
+        if state.get("name", "").casefold() == normalized_state_name:
+            return {"state_id": state.get("id")}
+
+    return {"error": f"State {state_name!r} not found for issue {issue_id}"}
 
 
 async def delete_issue(issue_id: str) -> dict[str, Any]:
