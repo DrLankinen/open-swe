@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import UTC, datetime, timedelta
 
 from agent.pollers.github import parse_github_poll_repos, poll_github_once
 from agent.pollers.linear import poll_linear_once
+from agent.utils.poller_state import safe_update_status
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,14 @@ def _poll_interval_seconds() -> float:
         msg = "POLL_INTERVAL_SECONDS must be greater than 0"
         raise ValueError(msg)
     return interval
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _next_run_iso(interval: float) -> str:
+    return (datetime.now(UTC) + timedelta(seconds=interval)).isoformat().replace("+00:00", "Z")
 
 
 def validate_poller_config() -> list[tuple[str, str]]:
@@ -72,13 +82,53 @@ async def run_pollers_forever() -> None:
     )
 
     while True:
+        next_run_at = _next_run_iso(interval)
         if github_enabled:
             await poll_github_once(repos)
+            await safe_update_status(
+                "github",
+                {
+                    "enabled": True,
+                    "poll_interval_seconds": interval,
+                    "next_run_at": next_run_at,
+                    "configured_repos": [f"{owner}/{repo}" for owner, repo in repos],
+                },
+            )
+            for owner, repo in repos:
+                await safe_update_status(
+                    f"github:{owner}/{repo}",
+                    {
+                        "enabled": True,
+                        "poll_interval_seconds": interval,
+                        "next_run_at": next_run_at,
+                        "repo": f"{owner}/{repo}",
+                    },
+                )
         if linear_enabled:
             try:
                 await poll_linear_once()
             except Exception:
                 logger.exception("Linear polling failed")
+                await safe_update_status(
+                    "linear",
+                    {
+                        "running": False,
+                        "last_finished_at": _now_iso(),
+                        "last_error": "Linear polling failed",
+                    },
+                )
+            await safe_update_status(
+                "linear",
+                {
+                    "enabled": True,
+                    "poll_interval_seconds": interval,
+                    "next_run_at": next_run_at,
+                },
+            )
+        if not github_enabled:
+            await safe_update_status("github", {"enabled": False, "running": False})
+        if not linear_enabled:
+            await safe_update_status("linear", {"enabled": False, "running": False})
         await asyncio.sleep(interval)
 
 

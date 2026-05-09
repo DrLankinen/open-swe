@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from typing import Any
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from langchain_core.messages.content import create_text_block
 from langgraph_sdk import get_client
 from langgraph_sdk.client import LangGraphClient
@@ -1294,6 +1296,278 @@ async def slack_webhook_verify() -> dict[str, str]:
 async def health_check() -> dict[str, str]:
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dashboard_poll_interval_seconds() -> float | None:
+    raw_value = os.environ.get("POLL_INTERVAL_SECONDS", "30")
+    try:
+        interval = float(raw_value)
+    except ValueError:
+        return None
+    return interval if interval > 0 else None
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host in {"localhost", "testclient"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _require_local_dashboard_request(request: Request) -> None:
+    client_host = request.client.host if request.client else ""
+    if not client_host or not _is_loopback_host(client_host):
+        raise HTTPException(status_code=403, detail="Dashboard is only available locally")
+
+
+def _configured_dashboard_repos() -> list[str]:
+    from agent.pollers.github import parse_github_poll_repos
+
+    try:
+        return [f"{owner}/{repo}" for owner, repo in parse_github_poll_repos()]
+    except ValueError:
+        return []
+
+
+async def _dashboard_status_payload() -> dict[str, Any]:
+    from agent.utils.poller_state import get_statuses
+
+    github_enabled = _env_bool("ENABLE_GITHUB_POLLER", default=True)
+    linear_enabled = _env_bool("ENABLE_LINEAR_POLLER", default=True)
+    repos = _configured_dashboard_repos()
+    status_keys = ["github", "linear", *(f"github:{repo}" for repo in repos)]
+    try:
+        stored_statuses = await get_statuses(status_keys)
+        status_error = None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to read dashboard poller status: %s", exc)
+        stored_statuses = dict.fromkeys(status_keys)
+        status_error = str(exc) or type(exc).__name__
+
+    github_status = stored_statuses.get("github") or {}
+    linear_status = stored_statuses.get("linear") or {}
+    repo_statuses = []
+    for repo in repos:
+        status = stored_statuses.get(f"github:{repo}") or {}
+        repo_statuses.append(
+            {
+                "running": False,
+                **status,
+                "enabled": github_enabled,
+                "repo": repo,
+            }
+        )
+
+    interval = _dashboard_poll_interval_seconds()
+    return {
+        "project": "Open SWE",
+        "trigger_mode": os.environ.get("TRIGGER_MODE", ""),
+        "langgraph_url": LANGGRAPH_URL,
+        "poll_interval_seconds": interval,
+        "status_error": status_error,
+        "pollers": {
+            "github": {
+                "running": False,
+                **github_status,
+                "enabled": github_enabled,
+                "configured_repos": repos,
+                "repos": repo_statuses,
+            },
+            "linear": {
+                "running": False,
+                **linear_status,
+                "enabled": linear_enabled,
+            },
+        },
+    }
+
+
+@app.get("/api/dashboard/status")
+async def dashboard_status(request: Request) -> dict[str, Any]:
+    """Return local admin dashboard status."""
+    _require_local_dashboard_request(request)
+    return await _dashboard_status_payload()
+
+
+@app.post("/api/dashboard/trigger/github")
+async def dashboard_trigger_github(request: Request) -> dict[str, Any]:
+    """Manually run the GitHub poller once from the local dashboard."""
+    _require_local_dashboard_request(request)
+    if not _env_bool("ENABLE_GITHUB_POLLER", default=True):
+        return {"status": "disabled", "poller": "github"}
+    from agent.pollers.github import parse_github_poll_repos, poll_github_once
+
+    try:
+        repos = parse_github_poll_repos()
+    except ValueError as exc:
+        return {"status": "error", "poller": "github", "error": str(exc)}
+    return await poll_github_once(repos)
+
+
+@app.post("/api/dashboard/trigger/linear")
+async def dashboard_trigger_linear(request: Request) -> dict[str, Any]:
+    """Manually run the Linear poller once from the local dashboard."""
+    _require_local_dashboard_request(request)
+    if not _env_bool("ENABLE_LINEAR_POLLER", default=True):
+        return {"status": "disabled", "poller": "linear"}
+    from agent.pollers.linear import poll_linear_once
+
+    return await poll_linear_once()
+
+
+@app.post("/api/dashboard/trigger/all")
+async def dashboard_trigger_all(request: Request) -> dict[str, Any]:
+    """Manually run all enabled pollers once from the local dashboard."""
+    _require_local_dashboard_request(request)
+    results: dict[str, Any] = {}
+    if _env_bool("ENABLE_GITHUB_POLLER", default=True):
+        results["github"] = await dashboard_trigger_github(request)
+    else:
+        results["github"] = {"status": "disabled", "poller": "github"}
+    if _env_bool("ENABLE_LINEAR_POLLER", default=True):
+        results["linear"] = await dashboard_trigger_linear(request)
+    else:
+        results["linear"] = {"status": "disabled", "poller": "linear"}
+    return {"status": "complete", "results": results}
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request) -> HTMLResponse:
+    """Serve the local admin dashboard."""
+    _require_local_dashboard_request(request)
+    return HTMLResponse(
+        """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Open SWE Dashboard</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; background: #0b1020; color: #e8ecf8; }
+    main { max-width: 1180px; margin: 0 auto; padding: 32px 20px 48px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: clamp(30px, 5vw, 56px); letter-spacing: -0.06em; }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    p { color: #aab4cf; margin: 6px 0 0; }
+    button { border: 0; color: #06111f; background: #8ee8ff; border-radius: 999px; padding: 10px 16px; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #c5f38c; }
+    button.warning { background: #ffd166; }
+    button:disabled { cursor: wait; opacity: 0.6; }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+    .card { grid-column: span 12; background: linear-gradient(145deg, #151d33, #10182b); border: 1px solid #25304a; border-radius: 22px; padding: 18px; box-shadow: 0 20px 60px #0005; }
+    .half { grid-column: span 6; }
+    .third { grid-column: span 4; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    .status { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #33405f; border-radius: 999px; padding: 6px 10px; color: #c9d4ed; font-size: 13px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
+    .dot.ok { background: #75f0a5; box-shadow: 0 0 18px #75f0a5; }
+    .dot.busy { background: #ffd166; box-shadow: 0 0 18px #ffd166; }
+    .dot.err { background: #ff6b6b; box-shadow: 0 0 18px #ff6b6b; }
+    dl { display: grid; grid-template-columns: minmax(120px, 180px) 1fr; gap: 8px 14px; margin: 0; }
+    dt { color: #7f8bac; }
+    dd { margin: 0; color: #f3f6ff; overflow-wrap: anywhere; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #070b16; border-radius: 16px; padding: 14px; color: #dce6ff; max-height: 360px; overflow: auto; }
+    .repo-list { display: grid; gap: 12px; }
+    .repo { border: 1px solid #2c3855; border-radius: 16px; padding: 14px; background: #0d1425; }
+    @media (max-width: 780px) { header { display: block; } .half, .third { grid-column: span 12; } dl { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Open SWE</h1>
+      <p>Local admin dashboard for pollers, triggers, and runtime status.</p>
+    </div>
+    <div class="actions">
+      <button onclick="triggerPoller('all')">Run All</button>
+      <button class="secondary" onclick="triggerPoller('github')">Run GitHub</button>
+      <button class="warning" onclick="triggerPoller('linear')">Run Linear</button>
+    </div>
+  </header>
+  <section class="grid">
+    <div class="card third"><h2>Project</h2><dl id="project"></dl></div>
+    <div class="card third"><h2>GitHub</h2><div id="githubStatus"></div></div>
+    <div class="card third"><h2>Linear</h2><div id="linearStatus"></div></div>
+    <div class="card half"><h2>GitHub Repos</h2><div id="repos" class="repo-list"></div></div>
+    <div class="card half"><h2>Last Manual Trigger</h2><pre id="manualResult">No manual trigger yet.</pre></div>
+  </section>
+</main>
+<script>
+const fmt = value => value || 'never';
+const json = value => JSON.stringify(value, null, 2);
+function badge(status) {
+  const running = Boolean(status && status.running);
+  const error = status && status.last_error;
+  const cls = running ? 'busy' : (error ? 'err' : 'ok');
+  const label = running ? 'running' : (error ? 'error' : 'idle');
+  return `<span class="status"><span class="dot ${cls}"></span>${label}</span>`;
+}
+function dl(entries) {
+  return entries.map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`).join('');
+}
+function renderPoller(target, status) {
+  document.getElementById(target).innerHTML = `${badge(status)}<dl style="margin-top:14px">${dl([
+    ['enabled', String(Boolean(status.enabled))],
+    ['last started', fmt(status.last_started_at)],
+    ['last finished', fmt(status.last_finished_at)],
+    ['next run', fmt(status.next_run_at)],
+    ['last error', status.last_error ? `<pre>${json(status.last_error)}</pre>` : 'none'],
+  ])}</dl>`;
+}
+async function refresh() {
+  const response = await fetch('/api/dashboard/status');
+  const data = await response.json();
+  document.getElementById('project').innerHTML = dl([
+    ['trigger mode', data.trigger_mode || '(unset)'],
+    ['LangGraph URL', data.langgraph_url],
+    ['poll interval', data.poll_interval_seconds ? `${data.poll_interval_seconds}s` : 'invalid'],
+    ['status store', data.status_error || 'ok'],
+  ]);
+  renderPoller('githubStatus', data.pollers.github);
+  renderPoller('linearStatus', data.pollers.linear);
+  const repos = data.pollers.github.repos || [];
+  document.getElementById('repos').innerHTML = repos.length ? repos.map(repo => `<div class="repo">${badge(repo)}<dl style="margin-top:12px">${dl([
+    ['repo', repo.repo],
+    ['last started', fmt(repo.last_started_at)],
+    ['last finished', fmt(repo.last_finished_at)],
+    ['next run', fmt(repo.next_run_at)],
+    ['last cursor', repo.last_cursor ? `<pre>${json(repo.last_cursor)}</pre>` : 'none'],
+    ['last error', repo.last_error ? `<pre>${json(repo.last_error)}</pre>` : 'none'],
+  ])}</dl></div>`).join('') : '<p>No GitHub repos configured.</p>';
+}
+async function triggerPoller(name) {
+  document.querySelectorAll('button').forEach(button => button.disabled = true);
+  const result = document.getElementById('manualResult');
+  result.textContent = `Running ${name}...`;
+  try {
+    const response = await fetch(`/api/dashboard/trigger/${name}`, { method: 'POST' });
+    result.textContent = json(await response.json());
+    await refresh();
+  } catch (error) {
+    result.textContent = String(error);
+  } finally {
+    document.querySelectorAll('button').forEach(button => button.disabled = false);
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
+        """
+    )
 
 
 _SUPPORTED_GH_EVENTS = frozenset(

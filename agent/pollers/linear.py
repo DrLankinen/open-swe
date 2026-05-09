@@ -9,7 +9,13 @@ from typing import Any
 
 import httpx
 
-from agent.utils.poller_state import get_cursor, mark_processed, set_cursor, was_processed
+from agent.utils.poller_state import (
+    get_cursor,
+    mark_processed,
+    safe_update_status,
+    set_cursor,
+    was_processed,
+)
 from agent.webapp import parse_linear_comment_trigger, process_linear_issue
 
 logger = logging.getLogger(__name__)
@@ -24,6 +30,10 @@ DEFAULT_LOOKBACK_MINUTES = 5
 def _default_since() -> str:
     since = datetime.now(UTC) - timedelta(minutes=DEFAULT_LOOKBACK_MINUTES)
     return since.isoformat().replace("+00:00", "Z")
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _event_id(comment: dict[str, Any]) -> str:
@@ -120,18 +130,68 @@ def build_linear_comment_payload(comment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def poll_linear_once() -> None:
+async def poll_linear_once() -> dict[str, Any]:
     """Poll Linear once for comments that mention Open SWE."""
+    started_at = _now_iso()
+    await safe_update_status(
+        "linear",
+        {"enabled": True, "running": True, "last_started_at": started_at, "last_error": None},
+    )
+    summary: dict[str, Any] = {
+        "poller": "linear",
+        "started_at": started_at,
+        "comments_scanned": 0,
+        "accepted_triggers": 0,
+        "ignored_events": 0,
+        "errors": [],
+    }
     api_key = os.environ.get("LINEAR_API_KEY", "")
     if not api_key:
         logger.info("Cannot poll Linear: LINEAR_API_KEY is not configured")
-        return
+        finished_at = _now_iso()
+        summary.update(
+            {
+                "finished_at": finished_at,
+                "status": "skipped",
+                "reason": "LINEAR_API_KEY is not configured",
+            }
+        )
+        await safe_update_status(
+            "linear",
+            {
+                "running": False,
+                "last_finished_at": finished_at,
+                "last_error": "LINEAR_API_KEY is not configured",
+                "summary": summary,
+            },
+        )
+        return summary
 
     since = await get_cursor(LINEAR_CURSOR_NAMESPACE, LINEAR_CURSOR_KEY) or _default_since()
     max_seen = since
+    summary["cursor"] = since
 
-    async with httpx.AsyncClient(headers=_headers(api_key), timeout=30) as client:
-        comments = await fetch_recent_linear_comments(client, since)
+    try:
+        async with httpx.AsyncClient(headers=_headers(api_key), timeout=30) as client:
+            comments = await fetch_recent_linear_comments(client, since)
+    except Exception as exc:
+        logger.exception("Linear polling failed")
+        finished_at = _now_iso()
+        error = str(exc) or type(exc).__name__
+        summary.update({"finished_at": finished_at, "status": "error"})
+        summary["errors"].append(error)
+        await safe_update_status(
+            "linear",
+            {
+                "running": False,
+                "last_finished_at": finished_at,
+                "last_error": error,
+                "summary": summary,
+            },
+        )
+        return summary
+
+    summary["comments_scanned"] = len(comments)
 
     for comment in sorted(comments, key=lambda item: item.get("updatedAt") or ""):
         updated_at = comment.get("updatedAt") or comment.get("createdAt") or ""
@@ -140,10 +200,12 @@ async def poll_linear_once() -> None:
 
         event_id = _event_id(comment)
         if await was_processed(DEDUPE_NAMESPACE, event_id):
+            summary["ignored_events"] += 1
             continue
 
         body = (comment.get("body") or "").lower()
         if "@openswe" not in body:
+            summary["ignored_events"] += 1
             await mark_processed(DEDUPE_NAMESPACE, event_id)
             continue
 
@@ -151,11 +213,27 @@ async def poll_linear_once() -> None:
         trigger = await parse_linear_comment_trigger(payload)
         if trigger.get("status") != "accepted":
             logger.debug("Ignoring Linear polled comment %s: %s", event_id, trigger)
+            summary["ignored_events"] += 1
             await mark_processed(DEDUPE_NAMESPACE, event_id, trigger)
             continue
 
+        summary["accepted_triggers"] += 1
         await process_linear_issue(trigger["issue"], trigger["repo_config"])
         await mark_processed(DEDUPE_NAMESPACE, event_id, {"issue": comment.get("issue", {})})
 
     if max_seen != since:
         await set_cursor(LINEAR_CURSOR_NAMESPACE, LINEAR_CURSOR_KEY, max_seen)
+    finished_at = _now_iso()
+    summary.update({"finished_at": finished_at, "status": "success", "cursor": max_seen})
+    await safe_update_status(
+        "linear",
+        {
+            "running": False,
+            "last_finished_at": finished_at,
+            "last_success_at": finished_at,
+            "last_error": None,
+            "last_cursor": max_seen,
+            "summary": summary,
+        },
+    )
+    return summary

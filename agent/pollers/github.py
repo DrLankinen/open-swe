@@ -10,7 +10,13 @@ from typing import Any
 import httpx
 
 from agent.utils.github_app import get_github_app_installation_token
-from agent.utils.poller_state import get_cursor, mark_processed, set_cursor, was_processed
+from agent.utils.poller_state import (
+    get_cursor,
+    mark_processed,
+    safe_update_status,
+    set_cursor,
+    was_processed,
+)
 from agent.webapp import (
     parse_github_issue_comment_trigger,
     parse_github_pr_comment_trigger,
@@ -61,9 +67,17 @@ def _repo_namespace(owner: str, repo: str) -> tuple[str, str, str, str]:
     return ("poller", "github", owner, repo)
 
 
+def _repo_status_key(owner: str, repo: str) -> str:
+    return f"github:{owner}/{repo}"
+
+
 def _default_since() -> str:
     since = datetime.now(UTC) - timedelta(minutes=DEFAULT_LOOKBACK_MINUTES)
     return since.isoformat().replace("+00:00", "Z")
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _issue_comment_event_id(comment: dict[str, Any]) -> str:
@@ -200,16 +214,26 @@ def build_pr_review_comment_payload(
     }
 
 
-async def poll_repo(owner: str, repo: str, token: str) -> None:
+async def poll_repo(owner: str, repo: str, token: str) -> dict[str, Any]:
     """Poll one GitHub repository for issue comments that mention Open SWE."""
     namespace = _repo_namespace(owner, repo)
     issue_since = await get_cursor(namespace, ISSUE_COMMENTS_CURSOR_KEY) or _default_since()
     issue_max_seen = issue_since
     review_since = await get_cursor(namespace, PR_REVIEW_COMMENTS_CURSOR_KEY) or _default_since()
     review_max_seen = review_since
+    summary: dict[str, Any] = {
+        "repo": f"{owner}/{repo}",
+        "issue_comments_scanned": 0,
+        "review_comments_scanned": 0,
+        "accepted_triggers": 0,
+        "ignored_events": 0,
+        "issue_cursor": issue_since,
+        "review_cursor": review_since,
+    }
 
     async with httpx.AsyncClient(headers=_headers(token), timeout=30) as client:
         comments = await fetch_issue_comments_since(client, owner, repo, issue_since)
+        summary["issue_comments_scanned"] = len(comments)
         for comment in sorted(comments, key=lambda item: item.get("updated_at") or ""):
             updated_at = comment.get("updated_at") or comment.get("created_at") or ""
             if updated_at and updated_at > issue_max_seen:
@@ -217,21 +241,25 @@ async def poll_repo(owner: str, repo: str, token: str) -> None:
 
             event_id = _issue_comment_event_id(comment)
             if await was_processed(DEDUPE_NAMESPACE, event_id):
+                summary["ignored_events"] += 1
                 continue
 
             body = (comment.get("body") or "").lower()
             if "@openswe" not in body and "@open-swe" not in body:
+                summary["ignored_events"] += 1
                 await mark_processed(DEDUPE_NAMESPACE, event_id)
                 continue
 
             issue_number = _issue_number_from_url(comment.get("issue_url", ""))
             if issue_number is None:
                 logger.warning("Could not determine issue number for GitHub comment %s", event_id)
+                summary["ignored_events"] += 1
                 await mark_processed(DEDUPE_NAMESPACE, event_id)
                 continue
 
             issue = await fetch_issue(client, owner, repo, issue_number)
             if not issue:
+                summary["ignored_events"] += 1
                 await mark_processed(DEDUPE_NAMESPACE, event_id)
                 continue
             payload = build_issue_comment_payload(owner, repo, issue, comment)
@@ -239,8 +267,10 @@ async def poll_repo(owner: str, repo: str, token: str) -> None:
                 trigger = await parse_github_pr_comment_trigger(payload)
                 if trigger.get("status") != "accepted":
                     logger.debug("Ignoring GitHub polled PR comment %s: %s", event_id, trigger)
+                    summary["ignored_events"] += 1
                     await mark_processed(DEDUPE_NAMESPACE, event_id, trigger)
                     continue
+                summary["accepted_triggers"] += 1
                 await process_github_pr_comment(payload, "issue_comment")
                 await mark_processed(DEDUPE_NAMESPACE, event_id, {"repo": f"{owner}/{repo}"})
                 continue
@@ -248,13 +278,16 @@ async def poll_repo(owner: str, repo: str, token: str) -> None:
             trigger = await parse_github_issue_comment_trigger(payload)
             if trigger.get("status") != "accepted":
                 logger.debug("Ignoring GitHub polled comment %s: %s", event_id, trigger)
+                summary["ignored_events"] += 1
                 await mark_processed(DEDUPE_NAMESPACE, event_id, trigger)
                 continue
 
+            summary["accepted_triggers"] += 1
             await process_github_issue(payload, "issue_comment")
             await mark_processed(DEDUPE_NAMESPACE, event_id, {"repo": f"{owner}/{repo}"})
 
         review_comments = await fetch_pr_review_comments_since(client, owner, repo, review_since)
+        summary["review_comments_scanned"] = len(review_comments)
         for comment in sorted(review_comments, key=lambda item: item.get("updated_at") or ""):
             updated_at = comment.get("updated_at") or comment.get("created_at") or ""
             if updated_at and updated_at > review_max_seen:
@@ -262,10 +295,12 @@ async def poll_repo(owner: str, repo: str, token: str) -> None:
 
             event_id = _pr_review_comment_event_id(comment)
             if await was_processed(DEDUPE_NAMESPACE, event_id):
+                summary["ignored_events"] += 1
                 continue
 
             body = (comment.get("body") or "").lower()
             if "@openswe" not in body and "@open-swe" not in body:
+                summary["ignored_events"] += 1
                 await mark_processed(DEDUPE_NAMESPACE, event_id)
                 continue
 
@@ -274,11 +309,13 @@ async def poll_repo(owner: str, repo: str, token: str) -> None:
                 logger.warning(
                     "Could not determine PR number for GitHub review comment %s", event_id
                 )
+                summary["ignored_events"] += 1
                 await mark_processed(DEDUPE_NAMESPACE, event_id)
                 continue
 
             pull_request = await fetch_pull_request(client, owner, repo, pr_number)
             if not pull_request:
+                summary["ignored_events"] += 1
                 await mark_processed(DEDUPE_NAMESPACE, event_id)
                 continue
 
@@ -286,9 +323,11 @@ async def poll_repo(owner: str, repo: str, token: str) -> None:
             trigger = await parse_github_pr_review_comment_trigger(payload)
             if trigger.get("status") != "accepted":
                 logger.debug("Ignoring GitHub polled review comment %s: %s", event_id, trigger)
+                summary["ignored_events"] += 1
                 await mark_processed(DEDUPE_NAMESPACE, event_id, trigger)
                 continue
 
+            summary["accepted_triggers"] += 1
             await process_github_pr_comment(payload, "pull_request_review_comment")
             await mark_processed(DEDUPE_NAMESPACE, event_id, {"repo": f"{owner}/{repo}"})
 
@@ -296,22 +335,114 @@ async def poll_repo(owner: str, repo: str, token: str) -> None:
         await set_cursor(namespace, ISSUE_COMMENTS_CURSOR_KEY, issue_max_seen)
     if review_max_seen != review_since:
         await set_cursor(namespace, PR_REVIEW_COMMENTS_CURSOR_KEY, review_max_seen)
+    summary["issue_cursor"] = issue_max_seen
+    summary["review_cursor"] = review_max_seen
+    return summary
 
 
-async def poll_github_once(repos: list[tuple[str, str]] | None = None) -> None:
+async def poll_github_once(repos: list[tuple[str, str]] | None = None) -> dict[str, Any]:
     """Poll configured GitHub repositories once."""
     repos = repos if repos is not None else parse_github_poll_repos()
+    started_at = _now_iso()
+    repo_names = [f"{owner}/{repo}" for owner, repo in repos]
+    await safe_update_status(
+        "github",
+        {
+            "enabled": True,
+            "running": True,
+            "configured_repos": repo_names,
+            "last_started_at": started_at,
+            "last_error": None,
+        },
+    )
+    summary: dict[str, Any] = {
+        "poller": "github",
+        "started_at": started_at,
+        "repos": [],
+        "accepted_triggers": 0,
+        "errors": [],
+    }
     if not repos:
         logger.info("No GitHub repos configured for polling")
-        return
+        finished_at = _now_iso()
+        summary.update({"finished_at": finished_at, "status": "skipped", "reason": "no repos"})
+        await safe_update_status(
+            "github",
+            {
+                "running": False,
+                "last_finished_at": finished_at,
+                "last_error": "No repos configured",
+            },
+        )
+        return summary
 
     token = await get_github_app_installation_token()
     if not token:
         logger.error("Cannot poll GitHub: GitHub App installation token is unavailable")
-        return
+        finished_at = _now_iso()
+        summary.update({"finished_at": finished_at, "status": "error"})
+        summary["errors"].append("GitHub App installation token is unavailable")
+        await safe_update_status(
+            "github",
+            {
+                "running": False,
+                "last_finished_at": finished_at,
+                "last_error": "GitHub App installation token is unavailable",
+            },
+        )
+        return summary
 
     for owner, repo in repos:
+        repo_started_at = _now_iso()
+        await safe_update_status(
+            _repo_status_key(owner, repo),
+            {
+                "enabled": True,
+                "running": True,
+                "repo": f"{owner}/{repo}",
+                "last_started_at": repo_started_at,
+                "last_error": None,
+            },
+        )
         try:
-            await poll_repo(owner, repo, token)
-        except Exception:
+            repo_summary = await poll_repo(owner, repo, token)
+            repo_finished_at = _now_iso()
+            summary["repos"].append(repo_summary)
+            summary["accepted_triggers"] += repo_summary["accepted_triggers"]
+            await safe_update_status(
+                _repo_status_key(owner, repo),
+                {
+                    "running": False,
+                    "last_finished_at": repo_finished_at,
+                    "last_success_at": repo_finished_at,
+                    "last_error": None,
+                    "summary": repo_summary,
+                    "last_cursor": {
+                        "issue_comments": repo_summary["issue_cursor"],
+                        "review_comments": repo_summary["review_cursor"],
+                    },
+                },
+            )
+        except Exception as exc:
             logger.exception("GitHub polling failed for %s/%s", owner, repo)
+            repo_finished_at = _now_iso()
+            error = str(exc) or type(exc).__name__
+            summary["errors"].append({"repo": f"{owner}/{repo}", "error": error})
+            await safe_update_status(
+                _repo_status_key(owner, repo),
+                {"running": False, "last_finished_at": repo_finished_at, "last_error": error},
+            )
+    finished_at = _now_iso()
+    status = "error" if summary["errors"] else "success"
+    summary.update({"finished_at": finished_at, "status": status})
+    await safe_update_status(
+        "github",
+        {
+            "running": False,
+            "last_finished_at": finished_at,
+            "last_success_at": finished_at if status == "success" else None,
+            "last_error": summary["errors"][-1] if summary["errors"] else None,
+            "summary": summary,
+        },
+    )
+    return summary

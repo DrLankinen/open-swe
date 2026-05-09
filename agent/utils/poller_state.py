@@ -11,6 +11,7 @@ from langgraph_sdk import get_client
 LANGGRAPH_URL = os.environ.get("LANGGRAPH_URL") or os.environ.get(
     "LANGGRAPH_URL_PROD", "http://localhost:2024"
 )
+STATUS_NAMESPACE = ("poller", "status")
 
 
 def _client():
@@ -55,3 +56,43 @@ async def mark_processed(
         event_id,
         {"processed_at": _now_iso(), "payload": payload or {}},
     )
+
+
+async def get_status(key: str) -> dict[str, Any] | None:
+    """Read a poller status record from the LangGraph store."""
+    item = await _client().store.get_item(STATUS_NAMESPACE, key)
+    if not item:
+        return None
+    value = item.get("value")
+    return value if isinstance(value, dict) else None
+
+
+async def get_statuses(keys: list[str]) -> dict[str, dict[str, Any] | None]:
+    """Read multiple poller status records."""
+    statuses: dict[str, dict[str, Any] | None] = {}
+    for key in keys:
+        statuses[key] = await get_status(key)
+    return statuses
+
+
+async def put_status(key: str, value: dict[str, Any]) -> None:
+    """Persist a poller status record."""
+    payload = dict(value)
+    payload["updated_at"] = _now_iso()
+    await _client().store.put_item(STATUS_NAMESPACE, key, payload)
+
+
+async def update_status(key: str, updates: dict[str, Any]) -> dict[str, Any]:
+    """Merge updates into a poller status record and persist it."""
+    current = await get_status(key) or {}
+    merged = {**current, **updates}
+    await put_status(key, merged)
+    return merged
+
+
+async def safe_update_status(key: str, updates: dict[str, Any]) -> None:
+    """Best-effort status update that must not break polling."""
+    try:
+        await update_status(key, updates)
+    except Exception:  # noqa: BLE001
+        return
